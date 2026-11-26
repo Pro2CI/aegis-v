@@ -569,7 +569,8 @@ object PacketStormHero : DigitalLeagueHero {
             onStatus("libbox запущен для ${activeNode.host}:${activeNode.port}")
             true
         } catch (e: Exception) {
-            onStatus("Ошибка запуска sing-box: ${e.cause?.message ?: e.message ?: "неизвестная ошибка"}")
+            Log.e("AegisV/PacketStorm", "libbox failed to start for ${activeNode.host}:${activeNode.port}", e)
+            onStatus("Ошибка запуска sing-box: ${e.message ?: e.javaClass.simpleName}")
             shutdownTunnelEngine()
             false
         }
