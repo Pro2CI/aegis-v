@@ -78,6 +78,10 @@ enum class VpnProtocol {
     VLESS_TLS,
     TROJAN,
     HYSTERIA2,
+    HYSTERIA,
+    TUIC,
+    VMESS,
+    SOCKS,
     SHADOWSOCKS,
     WIREGUARD,
     UNKNOWN
@@ -344,58 +348,63 @@ class AegisVEngine(
         return@withContext discovered.distinctBy { it.rawUri }
     }
 
-    private fun tryDecodeBase64(content: String): String {
-        return try {
-            if (!content.contains("://")) {
-                String(Base64.getDecoder().decode(content.replace("\n", "").replace("\r", "")))
-            } else {
-                content
-            }
-        } catch (_: Exception) {
-            content
-        }
+    private fun decodeBase64Text(value: String): String? {
+        val compact = value.filterNot { it.isWhitespace() }
+        if (compact.isEmpty()) return null
+        val normalized = compact.replace('-', '+').replace('_', '/')
+        val padded = normalized + "=".repeat((4 - normalized.length % 4) % 4)
+        return runCatching { String(Base64.getDecoder().decode(padded), Charsets.UTF_8) }.getOrNull()
     }
 
-    private fun parseVpnUri(uriStr: String): FreeVpnNode? {
+    private fun tryDecodeBase64(content: String): String {
+        val trimmed = content.trim().removePrefix("\uFEFF")
+        if (trimmed.contains("://") || trimmed.startsWith("{")) return trimmed
+        val whole = decodeBase64Text(trimmed)
+        if (!whole.isNullOrBlank() && (whole.contains("://") || whole.trimStart().startsWith("{"))) return whole
+        return trimmed.lineSequence().map { line ->
+            val item = line.trim()
+            if (item.contains("://") || item.isEmpty()) item
+            else decodeBase64Text(item)?.takeIf { it.contains("://") || it.trimStart().startsWith("{") } ?: item
+        }.joinToString("\n")
+    }
+
+    private fun parseVpnUri(input: String): FreeVpnNode? {
+        val uriStr = input.trim().removePrefix("\uFEFF")
         return try {
+            if (uriStr.startsWith("vmess://", true)) {
+                val jsonText = decodeBase64Text(uriStr.substringAfter("://").substringBefore("#")) ?: return null
+                val profile = JSONObject(jsonText)
+                val host = profile.optString("add").takeIf { it.isNotBlank() } ?: return null
+                val port = profile.optString("port").toIntOrNull()?.takeIf { it in 1..65535 } ?: return null
+                val sni = profile.optString("sni").takeIf { it.isNotBlank() } ?: host
+                val purity = PurityShield.evaluateNodePurity(host, port, uriStr)
+                if (purity < 80) return null
+                return FreeVpnNode("${host}_${port}_${uriStr.hashCode().toUInt().toString(16)}", uriStr,
+                    VpnProtocol.VMESS, host, port, sni, profile.optString("ps").ifBlank { "VMess-$host" },
+                    purityScore = purity)
+            }
             val protocol = when {
-                uriStr.startsWith("vless://") && uriStr.contains("reality") -> VpnProtocol.VLESS_REALITY
-                uriStr.startsWith("vless://") -> VpnProtocol.VLESS_TLS
-                uriStr.startsWith("trojan://") -> VpnProtocol.TROJAN
-                uriStr.startsWith("hy2://") || uriStr.startsWith("hysteria2://") -> VpnProtocol.HYSTERIA2
-                uriStr.startsWith("ss://") -> VpnProtocol.SHADOWSOCKS
+                uriStr.startsWith("vless://", true) && uriStr.contains("security=reality", true) -> VpnProtocol.VLESS_REALITY
+                uriStr.startsWith("vless://", true) -> VpnProtocol.VLESS_TLS
+                uriStr.startsWith("trojan://", true) -> VpnProtocol.TROJAN
+                uriStr.startsWith("hy2://", true) || uriStr.startsWith("hysteria2://", true) -> VpnProtocol.HYSTERIA2
+                uriStr.startsWith("hysteria://", true) -> VpnProtocol.HYSTERIA
+                uriStr.startsWith("tuic://", true) -> VpnProtocol.TUIC
+                uriStr.startsWith("socks://", true) || uriStr.startsWith("socks5://", true) -> VpnProtocol.SOCKS
+                uriStr.startsWith("ss://", true) -> VpnProtocol.SHADOWSOCKS
                 else -> return null
             }
-
-            val normalized = uriStr.replace("hy2://", "http://")
-                .replace("hysteria2://", "http://")
-                .replace("vless://", "http://")
-                .replace("trojan://", "http://")
-                .replace("ss://", "http://")
-
+            val normalized = uriStr.replace(Regex("(?i)^(hy2|hysteria2|hysteria|vless|trojan|tuic|socks5|socks|ss)://"), "http://")
             val parsed = URI(normalized)
             val host = parsed.host ?: return null
-            val port = if (parsed.port > 0) parsed.port else 443
-
+            val port = parsed.port.takeIf { it in 1..65535 } ?: if (protocol == VpnProtocol.SOCKS) 1080 else 443
             val query = decodeQueryParameters(parsed.rawQuery.orEmpty())
-            val sni = query["sni"]?.takeIf { it.isNotBlank() } ?: host
-
+            val sni = query["sni"]?.takeIf { it.isNotBlank() } ?: query["peer"]?.takeIf { it.isNotBlank() } ?: host
             val purity = PurityShield.evaluateNodePurity(host, port, uriStr)
             if (purity < 80) return null
-
-            FreeVpnNode(
-                id = "${host}_${port}_${uriStr.hashCode().toUInt().toString(16)}",
-                rawUri = uriStr,
-                protocol = protocol,
-                host = host,
-                port = port,
-                sni = sni,
-                remark = parsed.fragment ?: "AegisNode_${host.takeLast(5)}",
-                purityScore = purity
-            )
-        } catch (_: Exception) {
-            null
-        }
+            FreeVpnNode("${host}_${port}_${uriStr.hashCode().toUInt().toString(16)}", uriStr,
+                protocol, host, port, sni, parsed.fragment ?: "${protocol.name}-$host", purityScore = purity)
+        } catch (_: Exception) { null }
     }
 
     private suspend fun verifyNodesInParallel(candidates: List<FreeVpnNode>): List<FreeVpnNode> = coroutineScope {
@@ -936,6 +945,43 @@ object SingBoxConfigBuilder {
                 GhostCloakHero.applyTlsProfile(tls, queryMap, node.sni)
                 out.put("tls", tls)
             }
+            VpnProtocol.VMESS -> {
+                val profile = JSONObject(decodeBase64Text(node.rawUri.substringAfter("://").substringBefore("#")) ?: error("Invalid VMess payload"))
+                out.put("type", "vmess")
+                out.put("uuid", profile.optString("id"))
+                out.put("alter_id", profile.optInt("aid", 0))
+                out.put("security", profile.optString("scy").ifBlank { "auto" })
+                if (profile.optString("net") == "ws") out.put("transport", JSONObject().apply {
+                    put("type", "ws")
+                    profile.optString("path").takeIf { it.isNotBlank() }?.let { put("path", it) }
+                    profile.optString("host").takeIf { it.isNotBlank() }?.let { put("headers", JSONObject().put("Host", it)) }
+                })
+                if (profile.optString("tls") == "tls") out.put("tls", JSONObject().put("enabled", true).put("server_name", node.sni))
+            }
+            VpnProtocol.TUIC -> {
+                out.put("type", "tuic")
+                out.put("uuid", uri.rawUserInfo?.substringBefore(":")?.let { URLDecoder.decode(it, "UTF-8") } ?: "")
+                out.put("password", uri.rawUserInfo?.substringAfter(":", "")?.let { URLDecoder.decode(it, "UTF-8") } ?: "")
+                out.put("congestion_control", queryMap["congestion_control"] ?: "bbr")
+                out.put("udp_relay_mode", queryMap["udp_relay_mode"] ?: "native")
+                out.put("tls", JSONObject().put("enabled", true).put("server_name", node.sni))
+            }
+            VpnProtocol.HYSTERIA -> {
+                out.put("type", "hysteria")
+                out.put("up_mbps", queryMap["upmbps"]?.toIntOrNull() ?: 100)
+                out.put("down_mbps", queryMap["downmbps"]?.toIntOrNull() ?: 100)
+                out.put("password", uri.rawUserInfo?.let { URLDecoder.decode(it, "UTF-8") } ?: queryMap["auth"] ?: "")
+                out.put("tls", JSONObject().put("enabled", true).put("server_name", node.sni))
+            }
+            VpnProtocol.SOCKS -> {
+                out.put("type", "socks")
+                out.put("version", "5")
+                uri.rawUserInfo?.let { user ->
+                    out.put("username", URLDecoder.decode(user.substringBefore(":"), "UTF-8"))
+                    out.put("password", URLDecoder.decode(user.substringAfter(":", ""), "UTF-8"))
+                }
+            }
+            VpnProtocol.WIREGUARD, VpnProtocol.UNKNOWN -> error("Unsupported proxy protocol")
             else -> {
                 val (method, password) = decodeShadowsocksCredentials(node.rawUri, uri)
                 require(method.isNotBlank() && password.isNotBlank()) { "Invalid Shadowsocks method/password" }
