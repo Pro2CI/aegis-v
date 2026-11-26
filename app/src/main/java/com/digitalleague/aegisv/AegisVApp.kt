@@ -937,14 +937,14 @@ class AegisVpnService : VpnService() {
                     )
                 }
                 if (!engineStarted) {
-                    stopVpnTunnel()
+                    stopVpnTunnel("Не удалось запустить sing-box; VPN отключён")
                     return@launch
                 }
                 isServiceRunning = true
                 publishStatus(true, "VPN подключён через ${node.host}")
             } catch (e: Exception) {
                 Log.e("AegisVpnService", "sing-box start failed", e)
-                stopVpnTunnel()
+                stopVpnTunnel("Ошибка запуска VPN: ${e.cause?.message ?: e.message ?: "неизвестная ошибка"}")
             }
         }
     }
@@ -956,10 +956,9 @@ class AegisVpnService : VpnService() {
         })
     }
 
-    private fun stopVpnTunnel() {
-        val wasRunning = isServiceRunning
+    private fun stopVpnTunnel(statusMessage: String = "VPN отключён") {
         isServiceRunning = false
-        if (wasRunning) publishStatus(false, "VPN отключён")
+        publishStatus(false, statusMessage)
         PacketStormHero.shutdownTunnelEngine()
         try {
             tunInterface?.close()
