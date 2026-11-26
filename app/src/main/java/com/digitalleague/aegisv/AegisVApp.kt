@@ -702,8 +702,11 @@ object LeagueDiagnosticLab {
             false
         }
         report.add(
-            if (hasLibbox) "4. Packet-Storm (libbox): OK (нативное ядро sing-box готово!)"
-            else "4. Packet-Storm (libbox): Требуется добавить io.nekohasekai:libbox в Gradle"
+            if (hasLibbox) {
+                "4. Packet-Storm: libbox найден, но Android PlatformInterface/TUN bridge отсутствует; VPN отключён"
+            } else {
+                "4. Packet-Storm: нативное ядро libbox не подключено; VPN отключён"
+            }
         )
 
         report
