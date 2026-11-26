@@ -107,16 +107,18 @@ internal class SingBoxAndroidBridge(private val vpn: VpnService) {
 
     private fun addAddresses(builder: VpnService.Builder, options: Any, property: String) {
         iterate(readProperty(options, property)) { item ->
-            val address = readProperty(item, "address")?.toString() ?: return@iterate
-            val prefix = (readProperty(item, "prefix") as? Number)?.toInt() ?: return@iterate
+            val entry = item ?: return@iterate
+            val address = readProperty(entry, "address")?.toString() ?: return@iterate
+            val prefix = (readProperty(entry, "prefix") as? Number)?.toInt() ?: return@iterate
             builder.addAddress(address, prefix)
         }
     }
 
     private fun addRoutes(builder: VpnService.Builder, options: Any, property: String) {
         iterate(readProperty(options, property)) { item ->
-            val address = readProperty(item, "address")?.toString() ?: return@iterate
-            val prefix = (readProperty(item, "prefix") as? Number)?.toInt() ?: return@iterate
+            val entry = item ?: return@iterate
+            val address = readProperty(entry, "address")?.toString() ?: return@iterate
+            val prefix = (readProperty(entry, "prefix") as? Number)?.toInt() ?: return@iterate
             builder.addRoute(address, prefix)
         }
     }
