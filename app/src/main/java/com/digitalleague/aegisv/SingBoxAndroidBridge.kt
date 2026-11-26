@@ -235,8 +235,15 @@ internal class SingBoxAndroidBridge(private val vpn: VpnService) {
     private fun setProperty(target: Any, name: String, value: Any) {
         val setter = "set\${name.replaceFirstChar { it.uppercase() }}"
         val method = target.javaClass.methods.firstOrNull {
-            it.name.equals(setter, ignoreCase = true) && it.parameterCount == 1 &&
-                it.parameterTypes[0].isAssignableFrom(value.javaClass)
+            if (!it.name.equals(setter, ignoreCase = true) || it.parameterCount != 1) {
+                false
+            } else {
+                val parameter = it.parameterTypes[0]
+                parameter.isAssignableFrom(value.javaClass) ||
+                    (parameter == java.lang.Integer.TYPE && value is Int) ||
+                    (parameter == java.lang.Boolean.TYPE && value is Boolean) ||
+                    (parameter == java.lang.Long.TYPE && value is Long)
+            }
         } ?: error("libbox NetworkInterface setter not found: $setter")
         method.invoke(target, value)
     }
