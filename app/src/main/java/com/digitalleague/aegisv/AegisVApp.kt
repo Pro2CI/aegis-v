@@ -404,37 +404,46 @@ class AegisVEngine(
     }.onFailure { log("Защищённый кэш недоступен: ${it.javaClass.simpleName}") }.getOrDefault(emptyList())
 
     private suspend fun harvestPublicConfigs(): List<FreeVpnNode> = withContext(Dispatchers.IO) {
-        val discovered = mutableListOf<FreeVpnNode>()
-        for (sourceUrl in publicVolunteerSources.flatMap { BridgeWeaverHero.expandMirrorSources(it) }.distinct()) {
-            try {
-                // Не скрываем состояние источника: иначе пользователь видит вечный пустой список.
-                val rawContent = MirrorPhantomHero.fetchThroughStealthMirror(sourceUrl)
-                if (rawContent.isNullOrBlank()) {
-                    log("Источник недоступен или вернул пустой ответ: ${URI(sourceUrl).host}")
-                    continue
-                }
-                val decodedText = tryDecodeBase64(rawContent.trim())
-                var parsedFromSource = 0
-                decodedText.lineSequence()
-                    .map { it.trim() }
-                    .filter { it.isNotEmpty() }
-                    .forEach { line ->
-                        parseVpnUri(line)?.let {
-                            discovered.add(it)
-                            parsedFromSource++
-                        }
-                    }
-                val protocolCounts = discovered.groupingBy { it.protocol.name }.eachCount().entries
-                    .sortedByDescending { it.value }.joinToString { "${it.key}=${it.value}" }
-                log("Источник ${URI(sourceUrl).host}: найдено профилей: $parsedFromSource; протоколы: ${protocolCounts.ifBlank { "нет" }}")
-            } catch (e: Exception) {
-                log("Ошибка источника ${runCatching { URI(sourceUrl).host }.getOrNull() ?: sourceUrl}: ${e.javaClass.simpleName}: ${e.localizedMessage ?: "без подробностей"}")
+        // Try independent CDN hostnames in parallel so one blocked mirror cannot
+        // consume its full timeout before the next source is attempted.
+        suspend fun fetchAndParse(sourceUrl: String): Pair<String, List<FreeVpnNode>> {
+            val host = runCatching { URI(sourceUrl).host }.getOrNull() ?: sourceUrl
+            val rawContent = MirrorPhantomHero.fetchThroughStealthMirror(sourceUrl)
+            if (rawContent.isNullOrBlank()) return host to emptyList()
+            val parsed = tryDecodeBase64(rawContent.trim()).lineSequence()
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .mapNotNull(::parseVpnUri)
+                .distinctBy { it.rawUri }
+                .toList()
+            return host to parsed
+        }
+
+        val primarySources = publicVolunteerSources
+            .flatMap { BridgeWeaverHero.expandMirrorSources(it) }
+            .distinct()
+        val primaryResults = coroutineScope {
+            primarySources.map { url -> async(Dispatchers.IO) { fetchAndParse(url) } }.awaitAll()
+        }
+        val discovered = primaryResults.flatMap { (host, nodes) ->
+            log("Источник $host: найдено профилей: ${nodes.size}")
+            nodes
+        }.distinctBy { it.rawUri }.toMutableList()
+
+        // The API hostname is a last resort, not a regular polling endpoint.
+        // This avoids consuming unauthenticated GitHub API rate limits on every scan.
+        if (discovered.isEmpty()) {
+            val apiFallback = publicVolunteerSources.firstNotNullOfOrNull(BridgeWeaverHero::githubApiFallback)
+            if (apiFallback != null) {
+                val (host, nodes) = fetchAndParse(apiFallback)
+                log("Резервный GitHub API ($host): найдено профилей: ${nodes.size}")
+                discovered.addAll(nodes)
             }
         }
-        log("Всего найдено профилей до проверки доступности: ${discovered.size}")
-        return@withContext discovered.distinctBy { it.rawUri }
-    }
 
+        log("Всего найдено профилей до проверки доступности: ${discovered.size}")
+        discovered.distinctBy { it.rawUri }
+    }
     private fun decodeBase64Text(value: String): String? {
         val compact = value.filterNot { it.isWhitespace() }
         if (compact.isEmpty()) return null
@@ -608,11 +617,11 @@ object MirrorPhantomHero : DigitalLeagueHero {
         try {
             val url = URL(targetUrl)
             val conn = (url.openConnection() as HttpsURLConnection).apply {
-                connectTimeout = 8000
-                readTimeout = 8000
+                connectTimeout = 6000
+                readTimeout = 6000
                 instanceFollowRedirects = true
                 setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36")
-                setRequestProperty("Accept", "text/plain,application/octet-stream;q=0.9,*/*;q=0.5")
+                setRequestProperty("Accept", "application/vnd.github.raw, text/plain,application/octet-stream;q=0.9,*/*;q=0.5")
                 setRequestProperty("Accept-Encoding", "identity")
                 setRequestProperty("Cache-Control", "no-cache")
             }
@@ -827,24 +836,37 @@ object BridgeWeaverHero : DigitalLeagueHero {
     override val heroName = "Bridge-Weaver (Ткач Мостов)"
     override val specialty = "Резервный CDN-маршрут для публичных источников подписок"
 
+    private data class GitHubRawPath(val owner: String, val repository: String, val branch: String, val filePath: String)
+
+    private fun parseGitHubRawPath(sourceUrl: String): GitHubRawPath? {
+        val prefix = "https://raw.githubusercontent.com/"
+        if (!sourceUrl.startsWith(prefix)) return null
+        val path = sourceUrl.removePrefix(prefix)
+        val owner = path.substringBefore("/")
+        val remainder = path.substringAfter("/", "")
+        val repository = remainder.substringBefore("/")
+        val branchAndPath = remainder.substringAfter("/", "")
+        val branch = branchAndPath.substringBefore("/")
+        val filePath = branchAndPath.substringAfter("/", "")
+        if (owner.isBlank() || repository.isBlank() || branch.isBlank() || filePath.isBlank()) return null
+        return GitHubRawPath(owner, repository, branch, filePath)
+    }
+
     fun expandMirrorSources(sourceUrl: String): List<String> {
         val candidates = linkedSetOf(sourceUrl)
-        val prefix = "https://raw.githubusercontent.com/"
-        if (sourceUrl.startsWith(prefix)) {
-            val path = sourceUrl.removePrefix(prefix)
-            val owner = path.substringBefore("/")
-            val remainder = path.substringAfter("/", "")
-            val repository = remainder.substringBefore("/")
-            val branchAndPath = remainder.substringAfter("/", "")
-            val branch = branchAndPath.substringBefore("/")
-            val filePath = branchAndPath.substringAfter("/", "")
-            if (owner.isNotBlank() && repository.isNotBlank() && branch.isNotBlank() && filePath.isNotBlank()) {
-                candidates.add("https://cdn.jsdelivr.net/gh/$owner/$repository@$branch/$filePath")
-            }
-        }
+        val path = parseGitHubRawPath(sourceUrl) ?: return candidates.toList()
+        val repoPath = "${path.owner}/${path.repository}"
+        listOf("cdn.jsdelivr.net", "fastly.jsdelivr.net", "gcore.jsdelivr.net", "testingcf.jsdelivr.net")
+            .forEach { cdn -> candidates.add("https://$cdn/gh/$repoPath@${path.branch}/${path.filePath}") }
+        candidates.add("https://raw.githack.com/$repoPath/${path.branch}/${path.filePath}")
+        candidates.add("https://github.com/$repoPath/raw/refs/heads/${path.branch}/${path.filePath}")
         return candidates.toList()
     }
 
+    fun githubApiFallback(sourceUrl: String): String? {
+        val path = parseGitHubRawPath(sourceUrl) ?: return null
+        return "https://api.github.com/repos/${path.owner}/${path.repository}/contents/${path.filePath}?ref=${path.branch}"
+    }
     override suspend fun onLeagueSignal(signal: LeagueSignal) {}
 }
 
