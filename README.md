@@ -6,16 +6,23 @@ Android application scaffold for the supplied AEGIS-V Kotlin/Jetpack Compose sou
 
 GitHub Actions builds a debug APK on pushes to `main` and pull requests. Download it from the workflow run's **Artifacts** section.
 
-For a local build, use JDK 17 and Gradle 8.9:
+Build toolchain:
+- Android Gradle Plugin 8.13.2
+- Gradle 8.13
+- Kotlin 2.2.10
+- JDK 17
+- Android compile SDK 36
 
-```bash
-gradle :app:assembleDebug
-```
+The app pins sing-box Android libbox 1.14.4 from JitPack.
 
-## Important VPN status
+## VPN runtime status
 
-The supplied source creates an Android `VpnService` TUN interface, but its Packet-Storm fallback only opened a local TCP listening socket; it did not forward packets. That false fallback has now been removed. The service fails closed and tears down the TUN interface unless a real engine start is confirmed. This prevents the app from reporting a false VPN connection or silently black-holing device traffic.
+The Android service now delegates TUN creation to the sing-box `PlatformInterface.openTun` callback and starts the libbox `CommandServer`. The host bridge is isolated in `SingBoxAndroidBridge.kt`; the Compose UI does not claim a connection merely because a node was selected.
 
-**Runtime VPN is still not implemented.** The reflective sing-box call is not a complete Android libbox integration: the required `PlatformInterface` adapter, TUN file-descriptor handoff, lifecycle callbacks, and config validation are still missing. Do not rely on this build for traffic protection until that native integration is completed and tested on a device with a valid server profile.
+**This is an integration build, not yet a device-verified VPN release.** The bridge currently provides the TUN/protect path and conservative defaults for optional platform callbacks. It still requires CI compilation, runtime validation on a physical Android device, and testing with a valid VLESS/Reality, Trojan, Hysteria2, or Shadowsocks profile before it can be relied on for traffic protection. If libbox startup fails, the service must stop and close the TUN.
 
-The public subscription URLs in the source are third-party sources and their availability, safety, and node ownership are not guaranteed.
+The free public subscription sources are third-party sources. Their availability, safety, and node ownership are not guaranteed.
+
+## Licensing
+
+The bundled sing-box libbox dependency is GPL-3.0-or-later. Any distributed build containing it must comply with the corresponding source and license requirements. Review the upstream libbox license before publishing APKs.
