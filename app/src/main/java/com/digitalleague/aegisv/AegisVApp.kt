@@ -441,7 +441,8 @@ class AegisVEngine(
         if (topNode != null && topNode.id != _bestNodeFlow.value?.id) {
             _bestNodeFlow.value = topNode
             log("✅ Лучший свободный канал готов: [${topNode.protocol}] ${topNode.host}:${topNode.port} (${topNode.latencyMs} мс)")
-            DigitalLeagueBus.emitSignal(LeagueSignal.SafeTunnelEstablished(topNode))
+            // A reachable TCP endpoint is only a candidate, not an established VPN tunnel.
+            // SafeTunnelEstablished must only be emitted after verified packet forwarding.
         }
     }
 
