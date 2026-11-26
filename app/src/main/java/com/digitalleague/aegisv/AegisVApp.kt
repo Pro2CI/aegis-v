@@ -476,7 +476,8 @@ class AegisVEngine(
     }
 
     private fun log(message: String) {
-        val updated = (_logsFlow.value + message).takeLast(50)
+        val safeMessage = HeartCoreHero.sanitizeDiagnostic(message)
+        val updated = (_logsFlow.value + safeMessage).takeLast(50)
         _logsFlow.value = updated
     }
 }
@@ -692,8 +693,19 @@ object BridgeWeaverHero : DigitalLeagueHero {
 object HeartCoreHero : DigitalLeagueHero {
     override val heroId = "HERO_10_HEART_CORE"
     override val heroName = "Heart-Core (Хранитель Чистого Сердца)"
-    override val specialty = "Контроль Zero-Logs, приватности и экономии батареи"
-    override suspend fun onLeagueSignal(signal: LeagueSignal) {}
+    override val specialty = "Очистка диагностических сообщений от ключей и учётных данных"
+    private val vpnUriPattern = Regex("(?i)(?:vless|trojan|ss|hy2|hysteria2)://\\S+")
+    private val credentialPattern = Regex("(?i)(password|passwd|uuid|token|private[_-]?key|pbk)=([^&\\s]+)")
+    private val uuidPattern = Regex("(?i)\\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\\b")
+
+    fun sanitizeDiagnostic(message: String): String =
+        message.replace(vpnUriPattern, "<vpn-uri-redacted>")
+            .replace(credentialPattern) { match -> match.groupValues[1] + "=<redacted>" }
+            .replace(uuidPattern, "<uuid-redacted>")
+
+    override suspend fun onLeagueSignal(signal: LeagueSignal) {
+        // Diagnostic data is kept in memory only and sanitized before it reaches the UI.
+    }
 }
 
 /**
