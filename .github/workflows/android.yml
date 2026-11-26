@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -26,10 +26,25 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6.4.1
         with:
-          gradle-version: "8.13"
+          gradle-version: "9.9.2"
+
+      - name: Generate and refresh Gradle Wrapper
+        run: |
+          gradle --no-daemon wrapper --gradle-version=9.9.2 --gradle-distribution-sha256-sum=971fcd7150ca4ba04852c0b2ca0d2d0ab9468e14b03473eab19528809914c76b
+          ./gradlew --no-daemon wrapper
+
+      - name: Commit refreshed Gradle Wrapper
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add gradlew gradlew.bat gradle/wrapper/gradle-wrapper.jar gradle/wrapper/gradle-wrapper.properties
+          if ! git diff --cached --quiet; then
+            git commit -m "build: update Gradle Wrapper to 9.9.2"
+            git push
+          fi
 
       - name: Build debug APK
-        run: gradle --no-daemon :app:assembleDebug
+        run: ./gradlew --no-daemon :app:assembleDebug
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v7
