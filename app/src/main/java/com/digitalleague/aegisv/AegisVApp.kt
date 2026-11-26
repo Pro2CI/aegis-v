@@ -221,6 +221,14 @@ class NeuroChameleon {
 // ЧАСТЬ 4: БОЕВОЙ ДВИЖОК АГЕНТА (AEGIS-V ENGINE)
 // ============================================================================
 
+private fun decodeQueryParameters(rawQuery: String): Map<String, String> =
+    rawQuery.split("&").mapNotNull { item ->
+        if (item.isBlank()) return@mapNotNull null
+        val key = item.substringBefore("=")
+        val value = item.substringAfter("=", "")
+        runCatching { URLDecoder.decode(key, "UTF-8") to URLDecoder.decode(value, "UTF-8") }.getOrNull()
+    }.toMap()
+
 class AegisVEngine(
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 ) : DigitalLeagueHero {
@@ -333,7 +341,7 @@ class AegisVEngine(
             }
         }
         log("Всего найдено профилей до проверки доступности: ${discovered.size}")
-        return@withContext discovered.distinctBy { "${it.host}:${it.port}" }
+        return@withContext discovered.distinctBy { it.rawUri }
     }
 
     private fun tryDecodeBase64(content: String): String {
@@ -348,13 +356,6 @@ class AegisVEngine(
         }
     }
 
-    private fun parseQueryParameters(rawQuery: String): Map<String, String> =
-        rawQuery.split("&").mapNotNull { item ->
-            if (item.isBlank()) return@mapNotNull null
-            val key = item.substringBefore("=")
-            val value = item.substringAfter("=", "")
-            runCatching { URLDecoder.decode(key, "UTF-8") to URLDecoder.decode(value, "UTF-8") }.getOrNull()
-        }.toMap()
     private fun parseVpnUri(uriStr: String): FreeVpnNode? {
         return try {
             val protocol = when {
@@ -376,7 +377,7 @@ class AegisVEngine(
             val host = parsed.host ?: return null
             val port = if (parsed.port > 0) parsed.port else 443
 
-            val query = parseQueryParameters(parsed.rawQuery.orEmpty())
+            val query = decodeQueryParameters(parsed.rawQuery.orEmpty())
             val sni = query["sni"]?.takeIf { it.isNotBlank() } ?: host
 
             val purity = PurityShield.evaluateNodePurity(host, port, uriStr)
@@ -791,7 +792,7 @@ object SingBoxConfigBuilder {
                 .replace("trojan://", "http://")
                 .replace("ss://", "http://")
         )
-        val queryMap = parseQueryParameters(uri.rawQuery.orEmpty())
+        val queryMap = decodeQueryParameters(uri.rawQuery.orEmpty())
         val uuidOrPass = uri.rawUserInfo?.let { URLDecoder.decode(it, "UTF-8") }.orEmpty()
 
         val out = JSONObject().apply {
