@@ -1060,6 +1060,7 @@ fun AegisVMainScreen(
     val logs by engine.logsFlow.collectAsState()
 
     var isVpnConnected by remember { mutableStateOf(false) }
+    var selectedNode by remember { mutableStateOf<FreeVpnNode?>(null) }
     var selectedRegion by remember { mutableStateOf(RegionProfile.STRICT_DPI) }
     var activeHeroCount by remember { mutableIntStateOf(DigitalLeagueBus.getActiveHeroesCount()) }
     var statusBanner by remember { mutableStateOf("Готов к автономному поиску свободной связи") }
@@ -1070,14 +1071,12 @@ fun AegisVMainScreen(
             activeHeroCount = DigitalLeagueBus.getActiveHeroesCount()
             when (signal) {
                 is LeagueSignal.SafeTunnelEstablished -> {
-                    statusBanner = "Лучший свободный канал: ${signal.activeNode.host} (${signal.activeNode.latencyMs} мс)"
-                    if (isVpnConnected) {
-                        onConnectTunnel(signal.activeNode)
-                    }
+                    statusBanner = "Кандидат на подключение: ${signal.activeNode.host} (${signal.activeNode.latencyMs} мс)"
                 }
                 is LeagueSignal.EmergencyFailover -> {
-                    statusBanner = "⚡ Zero-Drop прыжок на резервный узел!"
-                    signal.backupNode?.let { if (isVpnConnected) onConnectTunnel(it) }
+                    // Не перезапускаем VPN автоматически: TCP-пинг не подтверждает
+                    // совместимость профиля, а повторный старт мог обрывать рабочий туннель.
+                    statusBanner = "Резервный узел найден. Выберите его вручную для переподключения."
                 }
                 is LeagueSignal.HeroJoinedLeague -> {
                     statusBanner = "🤝 К Лиге присоединился: ${signal.heroName}"
@@ -1115,7 +1114,7 @@ fun AegisVMainScreen(
             item {
                 HeroGuardianCard(
                     isConnected = isVpnConnected,
-                    bestNode = bestNode,
+                    bestNode = selectedNode ?: bestNode,
                     statusText = statusBanner,
                     onToggleConnection = {
                         if (isVpnConnected) {
@@ -1126,7 +1125,7 @@ fun AegisVMainScreen(
                             // Запускаем реальный Android VpnService + libbox PlatformInterface.
                             // Состояние "подключено" не выставляем заранее: его подтвердит
                             // успешное создание TUN в нативном мосте.
-                            val nodeToConnect = bestNode ?: activePool.firstOrNull()
+                            val nodeToConnect = selectedNode ?: bestNode ?: activePool.firstOrNull()
                             if (nodeToConnect == null) {
                                 statusBanner = "Нет доступных узлов. Дождитесь завершения поиска."
                             } else {
@@ -1193,10 +1192,11 @@ fun AegisVMainScreen(
                 items(activePool, key = { it.id }) { node ->
                     FreeNodeItemCard(
                         node = node,
-                        isActive = bestNode?.id == node.id && isVpnConnected,
+                        isActive = (selectedNode ?: bestNode)?.id == node.id && isVpnConnected,
                         onSelectNode = {
-                            isVpnConnected = false
-                            statusBanner = "Выбран узел ${node.host}:${node.port}. VPN не запущен: Android libbox/TUN adapter ещё не готов."
+                            selectedNode = node
+                            statusBanner = "Переключаюсь на ${node.protocol.name}: ${node.host}:${node.port}"
+                            onConnectTunnel(node)
                         }
                     )
                 }
