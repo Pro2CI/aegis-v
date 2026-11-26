@@ -957,7 +957,11 @@ class AegisVpnService : VpnService() {
                         )
                     }
                 }
-                if (!engineStarted) {\n                    stopVpnTunnel()\n                    return@launch\n                }\n                isServiceRunning = true
+                if (!engineStarted) {
+                    stopVpnTunnel()
+                    return@launch
+                }
+                isServiceRunning = true
 
             } catch (e: Exception) {
                 stopVpnTunnel()
