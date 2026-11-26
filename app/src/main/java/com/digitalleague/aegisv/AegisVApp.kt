@@ -686,11 +686,14 @@ object LeagueDiagnosticLab {
         } catch (_: Exception) {
             false
         }
+        val hasAndroidBridge = runCatching {
+            Class.forName("com.digitalleague.aegisv.SingBoxAndroidBridge")
+        }.isSuccess
         report.add(
-            if (hasLibbox) {
-                "4. Packet-Storm: libbox найден, но Android PlatformInterface/TUN bridge отсутствует; VPN отключён"
-            } else {
-                "4. Packet-Storm: нативное ядро libbox не подключено; VPN отключён"
+            when {
+                !hasLibbox -> "4. Packet-Storm: нативное ядро libbox не подключено; VPN недоступен"
+                !hasAndroidBridge -> "4. Packet-Storm: libbox найден, но класс Android TUN bridge не загружен"
+                else -> "4. Packet-Storm: libbox и Android TUN bridge найдены; создание TUN проверяется при подключении"
             }
         )
 
