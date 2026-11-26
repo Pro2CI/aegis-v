@@ -339,7 +339,9 @@ class AegisVEngine(
                             parsedFromSource++
                         }
                     }
-                log("Источник ${URI(sourceUrl).host}: получено строк, найдено профилей: $parsedFromSource")
+                val protocolCounts = discovered.groupingBy { it.protocol.name }.eachCount().entries
+                    .sortedByDescending { it.value }.joinToString { "${it.key}=${it.value}" }
+                log("Источник ${URI(sourceUrl).host}: найдено профилей: $parsedFromSource; протоколы: ${protocolCounts.ifBlank { "нет" }}")
             } catch (e: Exception) {
                 log("Ошибка источника ${runCatching { URI(sourceUrl).host }.getOrNull() ?: sourceUrl}: ${e.javaClass.simpleName}: ${e.localizedMessage ?: "без подробностей"}")
             }
@@ -393,6 +395,18 @@ class AegisVEngine(
                 uriStr.startsWith("socks://", true) || uriStr.startsWith("socks5://", true) -> VpnProtocol.SOCKS
                 uriStr.startsWith("ss://", true) -> VpnProtocol.SHADOWSOCKS
                 else -> return null
+            }
+            if (protocol == VpnProtocol.SHADOWSOCKS && !uriStr.substringAfter("://").substringBefore("#").substringBefore("?").contains("@")) {
+                val legacy = decodeBase64Text(uriStr.substringAfter("://").substringBefore("#").substringBefore("?")) ?: return null
+                val endpoint = legacy.substringAfterLast("@", "")
+                val hostPort = endpoint.substringAfterLast("@", "").substringAfterLast(":")
+                val host = endpoint.substringAfterLast("@").substringBeforeLast(":").substringBeforeLast(":")
+                val port = hostPort.toIntOrNull()?.takeIf { it in 1..65535 } ?: return null
+                if (host.isBlank()) return null
+                val purity = PurityShield.evaluateNodePurity(host, port, uriStr)
+                if (purity < 80) return null
+                return FreeVpnNode("${host}_${port}_${uriStr.hashCode().toUInt().toString(16)}", uriStr,
+                    protocol, host, port, host, "SS-$host", purityScore = purity)
             }
             val normalized = uriStr.replace(Regex("(?i)^(hy2|hysteria2|hysteria|vless|trojan|tuic|socks5|socks|ss)://"), "http://")
             val parsed = URI(normalized)
