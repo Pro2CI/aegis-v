@@ -896,6 +896,14 @@ object SingBoxConfigBuilder {
         return root.toString(2)
     }
 
+    private fun decodeBase64Text(value: String): String? {
+        val compact = value.filterNot { it.isWhitespace() }
+        if (compact.isEmpty()) return null
+        val normalized = compact.replace('-', '+').replace('_', '/')
+        val padded = normalized + "=".repeat((4 - normalized.length % 4) % 4)
+        return runCatching { String(Base64.getDecoder().decode(padded), Charsets.UTF_8) }.getOrNull()
+    }
+
     private fun parseNodeToSingBoxOutbound(node: FreeVpnNode): JSONObject {
         val uri = URI(
             node.rawUri.replace("hy2://", "http://")
