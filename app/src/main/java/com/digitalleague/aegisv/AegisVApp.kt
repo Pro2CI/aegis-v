@@ -286,12 +286,14 @@ class AegisVEngine(
                     log("📡 Собрано кандидатов из открытых источников: ${rawCandidates.size}")
 
                     val healthyNodes = verifyNodesInParallel(rawCandidates.take(60))
+                    log("Проверка серверов: кандидатов ${rawCandidates.size}, TCP-доступны ${healthyNodes.size}")
                     healthyNodes.forEach { node ->
                         verifiedPool[node.id] = node
                     }
 
                     revalidateExistingPool()
                     updateRankedPool()
+                    log("В списке активных серверов: ${_activePoolFlow.value.size}")
                 } catch (e: Exception) {
                     log("⚠️ Сетевая турбулентность: ${e.localizedMessage}. Переключаю резервный маршрут...")
                 }
@@ -310,21 +312,29 @@ class AegisVEngine(
         val discovered = mutableListOf<FreeVpnNode>()
         for (sourceUrl in publicVolunteerSources) {
             try {
-                // Герой #02 Mirror-Phantom помогает загрузить конфиги в обход блокировок провайдера
+                // Не скрываем состояние источника: иначе пользователь видит вечный пустой список.
                 val rawContent = MirrorPhantomHero.fetchThroughStealthMirror(sourceUrl)
-                if (!rawContent.isNullOrBlank()) {
-                    val decodedText = tryDecodeBase64(rawContent.trim())
-                    decodedText.lines()
-                        .map { it.trim() }
-                        .filter { it.isNotEmpty() }
-                        .forEach { line ->
-                            parseVpnUri(line)?.let { node -> discovered.add(node) }
-                        }
+                if (rawContent.isNullOrBlank()) {
+                    log("Источник недоступен или вернул пустой ответ: ${URI(sourceUrl).host}")
+                    continue
                 }
-            } catch (_: Exception) {
-                // Переход к следующему зеркалу при недоступности
+                val decodedText = tryDecodeBase64(rawContent.trim())
+                var parsedFromSource = 0
+                decodedText.lineSequence()
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() }
+                    .forEach { line ->
+                        parseVpnUri(line)?.let {
+                            discovered.add(it)
+                            parsedFromSource++
+                        }
+                    }
+                log("Источник ${URI(sourceUrl).host}: получено строк, найдено профилей: $parsedFromSource")
+            } catch (e: Exception) {
+                log("Ошибка источника ${runCatching { URI(sourceUrl).host }.getOrNull() ?: sourceUrl}: ${e.javaClass.simpleName}: ${e.localizedMessage ?: "без подробностей"}")
             }
         }
+        log("Всего найдено профилей до проверки доступности: ${discovered.size}")
         return@withContext discovered.distinctBy { "${it.host}:${it.port}" }
     }
 
