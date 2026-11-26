@@ -384,7 +384,7 @@ class AegisVEngine(
             if (purity < 80) return null
 
             FreeVpnNode(
-                id = "${host}_$port_${uriStr.hashCode().toUInt().toString(16)}",
+                id = "${host}_${port}_${uriStr.hashCode().toUInt().toString(16)}",
                 rawUri = uriStr,
                 protocol = protocol,
                 host = host,
