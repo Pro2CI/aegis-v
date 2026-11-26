@@ -1118,10 +1118,16 @@ fun AegisVMainScreen(
                             onDisconnectTunnel()
                             statusBanner = "VPN отключён"
                         } else {
-                            // Не запрашиваем VPN-разрешение и не показываем ложный статус
-                            // до подключения настоящего Android PlatformInterface для libbox.
-                            isVpnConnected = false
-                            statusBanner = "VPN пока недоступен: требуется интеграция Android libbox/TUN"
+                            // Запускаем реальный Android VpnService + libbox PlatformInterface.
+                            // Состояние "подключено" не выставляем заранее: его подтвердит
+                            // успешное создание TUN в нативном мосте.
+                            val nodeToConnect = bestNode ?: activePool.firstOrNull()
+                            if (nodeToConnect == null) {
+                                statusBanner = "Нет доступных узлов. Дождитесь завершения поиска."
+                            } else {
+                                statusBanner = "Запрашиваю разрешение Android и запускаю VPN: ${nodeToConnect.host}:${nodeToConnect.port}"
+                                onConnectTunnel(nodeToConnect)
+                            }
                         }
                     }
                 )
