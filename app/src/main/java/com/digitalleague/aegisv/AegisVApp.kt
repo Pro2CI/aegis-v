@@ -841,12 +841,38 @@ object SingBoxConfigBuilder {
                 })
             }
             else -> {
+                val (method, password) = decodeShadowsocksCredentials(node.rawUri, uri)
+                require(method.isNotBlank() && password.isNotBlank()) { "Invalid Shadowsocks method/password" }
                 out.put("type", "shadowsocks")
-                out.put("method", "2022-blake3-aes-128-gcm")
-                out.put("password", uuidOrPass)
+                out.put("method", method)
+                out.put("password", password)
             }
         }
         return out
+    }
+
+    private fun decodeShadowsocksCredentials(rawUri: String, parsed: URI): Pair<String, String> {
+        fun decodeBase64(value: String): String {
+            val normalized = value.replace('-', '+').replace('_', '/')
+            val padded = normalized + "=".repeat((4 - normalized.length % 4) % 4)
+            return String(Base64.getDecoder().decode(padded), Charsets.UTF_8)
+        }
+        // SIP002: ss://BASE64(method:password)@host:port
+        val encodedUserInfo = parsed.rawUserInfo?.substringBefore(':')
+        if (!encodedUserInfo.isNullOrBlank()) {
+            val decoded = runCatching { decodeBase64(encodedUserInfo) }.getOrNull().orEmpty()
+            val method = decoded.substringBefore(':')
+            val password = decoded.substringAfter(":", "")
+            if (method.isNotBlank() && password.isNotBlank()) return method to password
+        }
+        // Legacy: ss://BASE64(method:password@host:port)#name
+        val payload = rawUri.removePrefix("ss://").substringBefore("#").substringBefore("?")
+        val decoded = decodeBase64(payload)
+        val credentials = decoded.substringBeforeLast('@', decoded)
+        val method = credentials.substringBefore(':')
+        val password = credentials.substringAfter(":", "")
+        require(method.isNotBlank() && password.isNotBlank()) { "Unsupported Shadowsocks URI encoding" }
+        return method to password
     }
 }
 
