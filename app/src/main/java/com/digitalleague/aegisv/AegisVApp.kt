@@ -727,9 +727,11 @@ object BridgeWeaverHero : DigitalLeagueHero {
             val owner = path.substringBefore("/")
             val remainder = path.substringAfter("/", "")
             val repository = remainder.substringBefore("/")
-            val filePath = remainder.substringAfter("/", "")
-            if (owner.isNotBlank() && repository.isNotBlank() && filePath.isNotBlank()) {
-                candidates.add("https://cdn.jsdelivr.net/gh/$owner/$repository@main/$filePath")
+            val branchAndPath = remainder.substringAfter("/", "")
+            val branch = branchAndPath.substringBefore("/")
+            val filePath = branchAndPath.substringAfter("/", "")
+            if (owner.isNotBlank() && repository.isNotBlank() && branch.isNotBlank() && filePath.isNotBlank()) {
+                candidates.add("https://cdn.jsdelivr.net/gh/$owner/$repository@$branch/$filePath")
             }
         }
         return candidates.toList()
