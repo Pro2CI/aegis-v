@@ -50,6 +50,7 @@ import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.URI
+import java.net.URLDecoder
 import java.net.URL
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
@@ -179,7 +180,7 @@ object PurityShield {
         val lowerUri = rawUri.lowercase()
         val lowerHost = host.lowercase()
 
-        if (suspiciousKeywords.any { lowerUri.contains(it) || lowerHost.contains(it) }) {
+        if (suspiciousKeywords.any { lowerUri.contains(it) || lowerHost.contains(it) } || SentinelEyeHero.isBlockedHost(host)) {
             return 0
         }
         if (port !in 1..65535) return 0
@@ -219,6 +220,14 @@ class NeuroChameleon {
 // ============================================================================
 // ЧАСТЬ 4: БОЕВОЙ ДВИЖОК АГЕНТА (AEGIS-V ENGINE)
 // ============================================================================
+
+private fun decodeQueryParameters(rawQuery: String): Map<String, String> =
+    rawQuery.split("&").mapNotNull { item ->
+        if (item.isBlank()) return@mapNotNull null
+        val key = item.substringBefore("=")
+        val value = item.substringAfter("=", "")
+        runCatching { URLDecoder.decode(key, "UTF-8") to URLDecoder.decode(value, "UTF-8") }.getOrNull()
+    }.toMap()
 
 class AegisVEngine(
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -283,17 +292,14 @@ class AegisVEngine(
             while (isActive && isPatrolling) {
                 try {
                     val rawCandidates = harvestPublicConfigs()
-                    log("📡 Собрано кандидатов из открытых источников: ${rawCandidates.size}")
-
-                    val healthyNodes = verifyNodesInParallel(rawCandidates.take(60))
-                    log("Проверка серверов: кандидатов ${rawCandidates.size}, TCP-доступны ${healthyNodes.size}")
-                    healthyNodes.forEach { node ->
-                        verifiedPool[node.id] = node
-                    }
-
-                    revalidateExistingPool()
+                    log("📡 Получено уникальных профилей из подписок: ${rawCandidates.size}")
+                    val tcpReachable = verifyNodesInParallel(rawCandidates.take(60))
+                    log("TCP-проверка: проверено ${minOf(rawCandidates.size, 60)}, порт доступен у ${tcpReachable.size}")
+                    // Replace the previous scan snapshot; stale nodes must not survive a failed scan.
+                    verifiedPool.clear()
+                    tcpReachable.forEach { node -> verifiedPool[node.id] = node }
                     updateRankedPool()
-                    log("В списке активных серверов: ${_activePoolFlow.value.size}")
+                    log("Актуальных TCP-кандидатов в списке: ${_activePoolFlow.value.size}")
                 } catch (e: Exception) {
                     log("⚠️ Сетевая турбулентность: ${e.localizedMessage}. Переключаю резервный маршрут...")
                 }
@@ -310,7 +316,7 @@ class AegisVEngine(
 
     private suspend fun harvestPublicConfigs(): List<FreeVpnNode> = withContext(Dispatchers.IO) {
         val discovered = mutableListOf<FreeVpnNode>()
-        for (sourceUrl in publicVolunteerSources) {
+        for (sourceUrl in publicVolunteerSources.flatMap { BridgeWeaverHero.expandMirrorSources(it) }.distinct()) {
             try {
                 // Не скрываем состояние источника: иначе пользователь видит вечный пустой список.
                 val rawContent = MirrorPhantomHero.fetchThroughStealthMirror(sourceUrl)
@@ -335,7 +341,7 @@ class AegisVEngine(
             }
         }
         log("Всего найдено профилей до проверки доступности: ${discovered.size}")
-        return@withContext discovered.distinctBy { "${it.host}:${it.port}" }
+        return@withContext discovered.distinctBy { it.rawUri }
     }
 
     private fun tryDecodeBase64(content: String): String {
@@ -371,15 +377,14 @@ class AegisVEngine(
             val host = parsed.host ?: return null
             val port = if (parsed.port > 0) parsed.port else 443
 
-            val query = parsed.query ?: ""
-            val sniMatch = Regex("sni=([^&]+)").find(query)
-            val sni = sniMatch?.groupValues?.get(1) ?: host
+            val query = decodeQueryParameters(parsed.rawQuery.orEmpty())
+            val sni = query["sni"]?.takeIf { it.isNotBlank() } ?: host
 
             val purity = PurityShield.evaluateNodePurity(host, port, uriStr)
             if (purity < 80) return null
 
             FreeVpnNode(
-                id = "${host}_$port",
+                id = "${host}_${port}_${uriStr.hashCode().toUInt().toString(16)}",
                 rawUri = uriStr,
                 protocol = protocol,
                 host = host,
@@ -440,6 +445,7 @@ class AegisVEngine(
     private suspend fun updateRankedPool() {
         val ranked = verifiedPool.values
             .filter { it.isHealthy }
+            .distinctBy { it.rawUri }
             .sortedByDescending { node ->
                 val chameleonBonus = chameleon.calculateAdaptabilityBonus(node, currentRegion)
                 (node.purityScore + chameleonBonus) - (node.latencyMs / 5)
@@ -470,7 +476,8 @@ class AegisVEngine(
     }
 
     private fun log(message: String) {
-        val updated = (_logsFlow.value + message).takeLast(50)
+        val safeMessage = HeartCoreHero.sanitizeDiagnostic(message)
+        val updated = (_logsFlow.value + safeMessage).takeLast(50)
         _logsFlow.value = updated
     }
 }
@@ -497,16 +504,31 @@ object MirrorPhantomHero : DigitalLeagueHero {
                 readTimeout = 8000
                 instanceFollowRedirects = true
                 setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36")
-                setRequestProperty("Accept", "text/plain,text/html,*/*;q=0.8")
+                setRequestProperty("Accept", "text/plain,application/octet-stream;q=0.9,*/*;q=0.5")
+                setRequestProperty("Accept-Encoding", "identity")
                 setRequestProperty("Cache-Control", "no-cache")
             }
-            if (conn.responseCode in 200..299) {
-                val text = BufferedReader(InputStreamReader(conn.inputStream)).use { it.readText() }
+            val status = conn.responseCode
+            if (status in 200..299) {
+                val text = BufferedReader(InputStreamReader(conn.inputStream)).use { reader ->
+                    val result = StringBuilder()
+                    val buffer = CharArray(8192)
+                    while (true) {
+                        val count = reader.read(buffer)
+                        if (count < 0) break
+                        require(result.length + count <= 4 * 1024 * 1024) { "Subscription response exceeds 4 MiB limit" }
+                        result.append(buffer, 0, count)
+                    }
+                    result.toString()
+                }
                 conn.disconnect()
+                if (text.isBlank()) Log.w("AegisV/Mirror", "Empty subscription response: $targetUrl")
                 return@withContext text
             }
+            Log.w("AegisV/Mirror", "Subscription HTTP $status from $targetUrl")
             conn.disconnect()
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            Log.w("AegisV/Mirror", "Subscription fetch failed: $targetUrl", error)
         }
         return@withContext null
     }
@@ -548,7 +570,8 @@ object PacketStormHero : DigitalLeagueHero {
             onStatus("libbox запущен для ${activeNode.host}:${activeNode.port}")
             true
         } catch (e: Exception) {
-            onStatus("Ошибка запуска sing-box: ${e.cause?.message ?: e.message ?: "неизвестная ошибка"}")
+            Log.e("AegisV/PacketStorm", "libbox failed to start for ${activeNode.host}:${activeNode.port}", e)
+            onStatus("Ошибка запуска sing-box: ${e.message ?: e.javaClass.simpleName}")
             shutdownTunnelEngine()
             false
         }
@@ -580,6 +603,7 @@ object CipherDnsHero : DigitalLeagueHero {
 
     suspend fun resolveCleanIp(domain: String): String? = withContext(Dispatchers.IO) {
         try {
+            require(domain.matches(Regex("[A-Za-z0-9.-]{1,253}"))) { "Invalid DNS query name" }
             val url = URL("https://1.1.1.1/dns-query?name=$domain&type=A")
             val conn = (url.openConnection() as HttpsURLConnection).apply {
                 setRequestProperty("Accept", "application/dns-json")
@@ -589,8 +613,17 @@ object CipherDnsHero : DigitalLeagueHero {
             if (conn.responseCode == 200) {
                 val body = BufferedReader(InputStreamReader(conn.inputStream)).use { it.readText() }
                 conn.disconnect()
-                val match = Regex("\"data\"\\s*:\\s*\"([0-9.]+)\"").find(body)
-                return@withContext match?.groupValues?.get(1)
+                val response = JSONObject(body)
+                if (response.optInt("Status", -1) != 0) return@withContext null
+                val answers = response.optJSONArray("Answer") ?: return@withContext null
+                for (index in 0 until answers.length()) {
+                    val answer = answers.optJSONObject(index) ?: continue
+                    if (answer.optInt("type") == 1) {
+                        val address = answer.optString("data")
+                        if (address.matches(Regex("(?:[0-9]{1,3}\\.){3}[0-9]{1,3}"))) return@withContext address
+                    }
+                }
+                return@withContext null
             }
             conn.disconnect()
         } catch (_: Exception) {
@@ -601,27 +634,59 @@ object CipherDnsHero : DigitalLeagueHero {
     override suspend fun onLeagueSignal(signal: LeagueSignal) {}
 }
 
-/** Герой #05: Фрагментация TLS ClientHello против глубокой инспекции пакетов (DPI) */
+/** Герой #05: единая TLS-политика для поддерживаемых sing-box outbound. */
 object GhostCloakHero : DigitalLeagueHero {
     override val heroId = "HERO_05_GHOST_CLOAK"
     override val heroName = "Ghost-Cloak (Плащ Невидимки)"
-    override val specialty = "TLS-фрагментация и защита от WebRTC-утечек"
+    override val specialty = "Проверка TLS SNI и допустимого uTLS fingerprint"
+
+    fun applyTlsProfile(tls: JSONObject, query: Map<String, String>, fallbackSni: String) {
+        val sni = query["sni"]?.takeIf { it.isNotBlank() } ?: fallbackSni
+        require(sni.length <= 253 && sni.matches(Regex("[A-Za-z0-9.-]+"))) { "Invalid TLS server name" }
+        tls.put("server_name", sni)
+        val fingerprint = query["fp"]?.lowercase()?.takeIf {
+            it in setOf("chrome", "firefox", "edge", "safari", "ios", "android", "360", "qq")
+        } ?: "chrome"
+        tls.put("utls", JSONObject().put("enabled", true).put("fingerprint", fingerprint))
+    }
+
     override suspend fun onLeagueSignal(signal: LeagueSignal) {}
 }
 
-/** Герой #06: Мультиплексирование (Mux) для ускорения медленных бесплатных узлов */
+/** Герой #06: управляемый opt-in mux; не меняет поведение профилей без mux=1. */
 object TurboPulseHero : DigitalLeagueHero {
     override val heroId = "HERO_06_TURBO_PULSE"
     override val heroName = "Turbo-Pulse (Ускоритель Потока)"
-    override val specialty = "Mux-сжатие и BBR-ускорение слабых каналов"
+    override val specialty = "Опциональное мультиплексирование sing-box для VLESS"
+
+    fun applyMultiplex(outbound: JSONObject, query: Map<String, String>, protocol: VpnProtocol) {
+        if (query["mux"] != "1" || protocol != VpnProtocol.VLESS_REALITY && protocol != VpnProtocol.VLESS_TLS) return
+        outbound.put("multiplex", JSONObject().apply {
+            put("enabled", true)
+            put("protocol", "smux")
+            put("max_connections", 4)
+            put("min_streams", 4)
+            put("max_streams", 16)
+            put("padding", true)
+        })
+    }
+
     override suspend fun onLeagueSignal(signal: LeagueSignal) {}
 }
 
-/** Герой #07: Блокировка фишинга, трекеров и вредоносных узлов */
+/** Герой #07: блокировка локальных, тестовых и известных мусорных endpoint до проверки. */
 object SentinelEyeHero : DigitalLeagueHero {
     override val heroId = "HERO_07_SENTINEL_EYE"
     override val heroName = "Sentinel-Eye (Всевидящее Око)"
-    override val specialty = "Анти-фишинг и защита от трекеров в реальном времени"
+    override val specialty = "Фильтрация локальных и подозрительных VPN endpoint"
+
+    private val blockedHosts = setOf("localhost", "localhost.localdomain", "0.0.0.0", "127.0.0.1", "::1")
+    fun isBlockedHost(host: String): Boolean {
+        val normalized = host.trim().trimEnd('.').lowercase()
+        return normalized in blockedHosts || normalized.endsWith(".localhost") ||
+            normalized.endsWith(".invalid") || normalized.endsWith(".test")
+    }
+
     override suspend fun onLeagueSignal(signal: LeagueSignal) {}
 }
 
@@ -648,11 +713,30 @@ object PhoenixRelayHero : DigitalLeagueHero {
     }
 }
 
-/** Герой #09: Резервные P2P-мосты и CDN-ретрансляторы */
+/** Герой #09: генерация проверяемых CDN-кандидатов для публичных raw GitHub подписок. */
 object BridgeWeaverHero : DigitalLeagueHero {
     override val heroId = "HERO_09_BRIDGE_WEAVER"
     override val heroName = "Bridge-Weaver (Ткач Мостов)"
-    override val specialty = "P2P и CDN-мосты при тотальной блокировке серверов"
+    override val specialty = "Резервный CDN-маршрут для публичных источников подписок"
+
+    fun expandMirrorSources(sourceUrl: String): List<String> {
+        val candidates = linkedSetOf(sourceUrl)
+        val prefix = "https://raw.githubusercontent.com/"
+        if (sourceUrl.startsWith(prefix)) {
+            val path = sourceUrl.removePrefix(prefix)
+            val owner = path.substringBefore("/")
+            val remainder = path.substringAfter("/", "")
+            val repository = remainder.substringBefore("/")
+            val branchAndPath = remainder.substringAfter("/", "")
+            val branch = branchAndPath.substringBefore("/")
+            val filePath = branchAndPath.substringAfter("/", "")
+            if (owner.isNotBlank() && repository.isNotBlank() && branch.isNotBlank() && filePath.isNotBlank()) {
+                candidates.add("https://cdn.jsdelivr.net/gh/$owner/$repository@$branch/$filePath")
+            }
+        }
+        return candidates.toList()
+    }
+
     override suspend fun onLeagueSignal(signal: LeagueSignal) {}
 }
 
@@ -660,8 +744,19 @@ object BridgeWeaverHero : DigitalLeagueHero {
 object HeartCoreHero : DigitalLeagueHero {
     override val heroId = "HERO_10_HEART_CORE"
     override val heroName = "Heart-Core (Хранитель Чистого Сердца)"
-    override val specialty = "Контроль Zero-Logs, приватности и экономии батареи"
-    override suspend fun onLeagueSignal(signal: LeagueSignal) {}
+    override val specialty = "Очистка диагностических сообщений от ключей и учётных данных"
+    private val vpnUriPattern = Regex("(?i)(?:vless|trojan|ss|hy2|hysteria2)://\\S+")
+    private val credentialPattern = Regex("(?i)(password|passwd|uuid|token|private[_-]?key|pbk)=([^&\\s]+)")
+    private val uuidPattern = Regex("(?i)\\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\\b")
+
+    fun sanitizeDiagnostic(message: String): String =
+        message.replace(vpnUriPattern, "<vpn-uri-redacted>")
+            .replace(credentialPattern) { match -> match.groupValues[1] + "=<redacted>" }
+            .replace(uuidPattern, "<uuid-redacted>")
+
+    override suspend fun onLeagueSignal(signal: LeagueSignal) {
+        // Diagnostic data is kept in memory only and sanitized before it reaches the UI.
+    }
 }
 
 /**
@@ -786,12 +881,8 @@ object SingBoxConfigBuilder {
                 .replace("trojan://", "http://")
                 .replace("ss://", "http://")
         )
-        val uuidOrPass = uri.userInfo ?: ""
-        val queryMap = (uri.query ?: "").split("&")
-            .mapNotNull {
-                val parts = it.split("=")
-                if (parts.size == 2) parts[0] to parts[1] else null
-            }.toMap()
+        val queryMap = decodeQueryParameters(uri.rawQuery.orEmpty())
+        val uuidOrPass = uri.rawUserInfo?.let { URLDecoder.decode(it, "UTF-8") }.orEmpty()
 
         val out = JSONObject().apply {
             put("tag", "proxy-out")
@@ -821,31 +912,63 @@ object SingBoxConfigBuilder {
                         })
                     }
                 }
+                GhostCloakHero.applyTlsProfile(tls, queryMap, node.sni)
                 out.put("tls", tls)
+                TurboPulseHero.applyMultiplex(out, queryMap, node.protocol)
             }
             VpnProtocol.TROJAN -> {
                 out.put("type", "trojan")
                 out.put("password", uuidOrPass)
-                out.put("tls", JSONObject().apply {
+                val tls = JSONObject().apply {
                     put("enabled", true)
                     put("server_name", node.sni)
-                })
+                }
+                GhostCloakHero.applyTlsProfile(tls, queryMap, node.sni)
+                out.put("tls", tls)
             }
             VpnProtocol.HYSTERIA2 -> {
                 out.put("type", "hysteria2")
                 out.put("password", uuidOrPass)
-                out.put("tls", JSONObject().apply {
+                val tls = JSONObject().apply {
                     put("enabled", true)
                     put("server_name", node.sni)
-                })
+                }
+                GhostCloakHero.applyTlsProfile(tls, queryMap, node.sni)
+                out.put("tls", tls)
             }
             else -> {
+                val (method, password) = decodeShadowsocksCredentials(node.rawUri, uri)
+                require(method.isNotBlank() && password.isNotBlank()) { "Invalid Shadowsocks method/password" }
                 out.put("type", "shadowsocks")
-                out.put("method", "2022-blake3-aes-128-gcm")
-                out.put("password", uuidOrPass)
+                out.put("method", method)
+                out.put("password", password)
             }
         }
         return out
+    }
+
+    private fun decodeShadowsocksCredentials(rawUri: String, parsed: URI): Pair<String, String> {
+        fun decodeBase64(value: String): String {
+            val normalized = value.replace('-', '+').replace('_', '/')
+            val padded = normalized + "=".repeat((4 - normalized.length % 4) % 4)
+            return String(Base64.getDecoder().decode(padded), Charsets.UTF_8)
+        }
+        // SIP002: ss://BASE64(method:password)@host:port
+        val encodedUserInfo = parsed.rawUserInfo?.substringBefore(':')
+        if (!encodedUserInfo.isNullOrBlank()) {
+            val decoded = runCatching { decodeBase64(encodedUserInfo) }.getOrNull().orEmpty()
+            val method = decoded.substringBefore(':')
+            val password = decoded.substringAfter(":", "")
+            if (method.isNotBlank() && password.isNotBlank()) return method to password
+        }
+        // Legacy: ss://BASE64(method:password@host:port)#name
+        val payload = rawUri.removePrefix("ss://").substringBefore("#").substringBefore("?")
+        val decoded = decodeBase64(payload)
+        val credentials = decoded.substringBeforeLast('@', decoded)
+        val method = credentials.substringBefore(':')
+        val password = credentials.substringAfter(":", "")
+        require(method.isNotBlank() && password.isNotBlank()) { "Unsupported Shadowsocks URI encoding" }
+        return method to password
     }
 }
 
