@@ -1138,11 +1138,15 @@ fun AegisVMainScreen(
                     bestNode = bestNode,
                     statusText = statusBanner,
                     onToggleConnection = {
-                        isVpnConnected = !isVpnConnected
-                        if (isVpnConnected && bestNode != null) {
-                            onConnectTunnel(bestNode!!)
-                        } else {
+                        if (isVpnConnected) {
+                            isVpnConnected = false
                             onDisconnectTunnel()
+                            statusBanner = "VPN отключён"
+                        } else {
+                            // Не запрашиваем VPN-разрешение и не показываем ложный статус
+                            // до подключения настоящего Android PlatformInterface для libbox.
+                            isVpnConnected = false
+                            statusBanner = "VPN пока недоступен: требуется интеграция Android libbox/TUN"
                         }
                     }
                 )
@@ -1205,9 +1209,8 @@ fun AegisVMainScreen(
                         node = node,
                         isActive = bestNode?.id == node.id && isVpnConnected,
                         onSelectNode = {
-                            isVpnConnected = true
-                            onConnectTunnel(node)
-                            statusBanner = "Подключен узел: ${node.host}:${node.port}"
+                            isVpnConnected = false
+                            statusBanner = "Выбран узел ${node.host}:${node.port}. VPN не запущен: Android libbox/TUN adapter ещё не готов."
                         }
                     )
                 }
