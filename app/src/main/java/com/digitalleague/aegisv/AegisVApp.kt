@@ -511,13 +511,17 @@ object MirrorPhantomHero : DigitalLeagueHero {
 /**
  * Герой #03: Отвечает за то, чтобы пакеты из виртуальной карты Android (TUN)
  * РЕАЛЬНО уходили в интернет через выбранный сервер, а не зависали в пустоте.
- * Автоматически подключает нативное ядро sing-box (libbox), если оно добавлено в Gradle,
- * либо поднимает локальный защищённый шлюз на устройстве.
+ * Использует только подтверждённую нативную интеграцию sing-box/libbox.
+ * Локального TCP-запасного шлюза нет: без проверки data-plane VPN не запускается.
  */
 object PacketStormHero : DigitalLeagueHero {
     override val heroId: String = "HERO_03_PACKET_STORM"
     override val heroName: String = "Packet-Storm (Шторм Пакетов)"
     override val specialty: String = "Android TUN bridge and sing-box CommandServer"
+
+    // Keep disabled until device tests prove libbox lifecycle, TUN fd handoff,
+    // configuration validation and real packet forwarding end-to-end.
+    private const val RUNTIME_DATA_PLANE_VERIFIED = false
 
     @Volatile
     private var activeBridge: SingBoxAndroidBridge? = null
@@ -529,6 +533,10 @@ object PacketStormHero : DigitalLeagueHero {
         onStatus: (String) -> Unit
     ): Boolean {
         shutdownTunnelEngine()
+        if (!RUNTIME_DATA_PLANE_VERIFIED) {
+            onStatus("VPN не запущен: Android libbox data-plane ещё не подтверждён на устройстве")
+            return false
+        }
         return try {
             val bridge = SingBoxAndroidBridge(service)
             bridge.start(singBoxJsonConfig)
@@ -905,8 +913,8 @@ class AegisVpnService : VpnService() {
         }
 
         val notification = builder
-            .setContentTitle("🦸‍♂️ Aegis-V: Щит Активен")
-            .setContentText("Свободный канал: ${node.host} (${node.protocol.name})")
+            .setContentTitle("Aegis-V: проверка запуска")
+            .setContentText("VPN не активен — проверяется нативный движок")
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setOngoing(true)
             .build()
