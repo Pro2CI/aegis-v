@@ -1,6 +1,10 @@
 package com.digitalleague.aegisv
 
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.VpnService
+import android.os.Build
+import android.system.OsConstants
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import java.lang.reflect.Proxy
@@ -42,6 +46,7 @@ internal class SingBoxAndroidBridge(private val vpn: VpnService) {
                     null
                 }
                 "openTun" -> openTun(args?.getOrNull(0) ?: error("missing TunOptions"))
+                "getInterfaces" -> createNetworkInterfaceIterator()
                 "underNetworkExtension", "includeAllNetworks", "usePlatformShell",
                 "usePlatformBridge", "usePlatformAutoRedirect", "usePlatformWIFIMonitor",
                 "usePlatformConnectionOwnerFinder", "usePlatformNotification",
@@ -51,7 +56,7 @@ internal class SingBoxAndroidBridge(private val vpn: VpnService) {
                 "clearDNSCache", "startNeighborMonitor", "closeNeighborMonitor",
                 "sendNotification", "cancelNotification", "autoDetectInterfaceControl" -> null
                 "readWIFIState", "localDNSTransport", "findConnectionOwner",
-                "getInterfaces", "lookupUser", "openShellSession", "createBridge",
+                "lookupUser", "openShellSession", "createBridge",
                 "createAutoRedirect", "lookupSFTPServer", "readSystemSSHHostKey" -> null
                 "toString" -> "AegisVPlatformInterface"
                 "hashCode" -> System.identityHashCode(this)
@@ -95,8 +100,13 @@ internal class SingBoxAndroidBridge(private val vpn: VpnService) {
         builder.setMtu(mtu.coerceIn(576, 9000))
         addAddresses(builder, options, "inet4Address")
         addAddresses(builder, options, "inet6Address")
-        addRoutes(builder, options, "inet4RouteAddress")
-        addRoutes(builder, options, "inet6RouteAddress")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            addRoutes(builder, options, "inet4RouteAddress")
+            addRoutes(builder, options, "inet6RouteAddress")
+        } else {
+            addRoutes(builder, options, "inet4RouteRange")
+            addRoutes(builder, options, "inet6RouteRange")
+        }
         addStrings(builder, options, "dnsServerAddress", true)
         addStrings(builder, options, "excludePackage", false)
         val pfd = builder.establish() ?: error("Android refused to establish the TUN interface")
@@ -141,10 +151,94 @@ internal class SingBoxAndroidBridge(private val vpn: VpnService) {
     }
 
     private fun readProperty(target: Any, name: String): Any? {
-        val suffix = name.replaceFirstChar { it.uppercase() }
-        return runCatching { target.javaClass.getMethod("get$suffix").invoke(target) }
-            .recoverCatching { target.javaClass.getMethod(name).invoke(target) }
-            .getOrNull()
+        val getter = "get\${name.replaceFirstChar { it.uppercase() }}"
+        val method = target.javaClass.methods.firstOrNull {
+            it.parameterCount == 0 && (it.name.equals(getter, ignoreCase = true) ||
+                it.name.equals(name, ignoreCase = true))
+        } ?: return null
+        return runCatching { method.invoke(target) }.getOrNull()
+    }
+
+    private fun createNetworkInterfaceIterator(): Any {
+        val connectivity = vpn.getSystemService(ConnectivityManager::class.java)
+        val systemInterfaces = runCatching {
+            java.net.NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+        }.getOrDefault(emptyList())
+        val boxType = Class.forName("io.nekohasekai.libbox.NetworkInterface")
+        val entries = mutableListOf<Any>()
+
+        for (network in connectivity.allNetworks) {
+            val link = runCatching { connectivity.getLinkProperties(network) }.getOrNull() ?: continue
+            val capabilities = runCatching { connectivity.getNetworkCapabilities(network) }.getOrNull() ?: continue
+            val name = link.interfaceName ?: continue
+            val systemInterface = systemInterfaces.firstOrNull { it.name == name } ?: continue
+            val entry = boxType.getDeclaredConstructor().newInstance()
+            val flags = runCatching {
+                var value = 0
+                if (systemInterface.isUp) value = value or OsConstants.IFF_UP or OsConstants.IFF_RUNNING
+                if (systemInterface.isLoopback) value = value or OsConstants.IFF_LOOPBACK
+                if (systemInterface.isPointToPoint) value = value or OsConstants.IFF_POINTOPOINT
+                if (systemInterface.supportsMulticast()) value = value or OsConstants.IFF_MULTICAST
+                value
+            }.getOrDefault(0)
+
+            setProperty(entry, "name", name)
+            setProperty(entry, "index", systemInterface.index)
+            setProperty(entry, "mtu", runCatching { systemInterface.mtu }.getOrDefault(1500))
+            setProperty(entry, "addresses", stringIterator(systemInterface.interfaceAddresses.map {
+                "\${it.address.hostAddress}/\${it.networkPrefixLength}"
+            }))
+            setProperty(entry, "dnsServer", stringIterator(link.dnsServers.mapNotNull { it.hostAddress }))
+            setProperty(entry, "dnsSearchDomain", stringIterator(
+                link.domains?.split(Regex("[,\\\\s]+"))?.filter { it.isNotBlank() }.orEmpty()
+            ))
+            setProperty(entry, "gateway", stringIterator(
+                link.routes.filter { it.destination.prefixLength == 0 }
+                    .mapNotNull { route -> route.gateway?.takeUnless { it.isAnyLocalAddress }?.hostAddress }
+            ))
+            setProperty(entry, "flags", flags)
+            setProperty(entry, "type", when {
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> 1
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> 2
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> 3
+                else -> 0
+            })
+            setProperty(entry, "metered",
+                !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED))
+            entries.add(entry)
+        }
+
+        val iteratorType = Class.forName("io.nekohasekai.libbox.NetworkInterfaceIterator")
+        val iterator = entries.iterator()
+        return Proxy.newProxyInstance(iteratorType.classLoader, arrayOf(iteratorType)) { _, method, _ ->
+            when (method.name) {
+                "hasNext" -> iterator.hasNext()
+                "next" -> if (iterator.hasNext()) iterator.next() else boxType.getDeclaredConstructor().newInstance()
+                else -> defaultValue(method.returnType)
+            }
+        }
+    }
+
+    private fun stringIterator(values: List<String>): Any {
+        val iteratorType = Class.forName("io.nekohasekai.libbox.StringIterator")
+        val iterator = values.iterator()
+        return Proxy.newProxyInstance(iteratorType.classLoader, arrayOf(iteratorType)) { _, method, _ ->
+            when (method.name) {
+                "hasNext" -> iterator.hasNext()
+                "next" -> if (iterator.hasNext()) iterator.next() else ""
+                "len" -> values.size
+                else -> defaultValue(method.returnType)
+            }
+        }
+    }
+
+    private fun setProperty(target: Any, name: String, value: Any) {
+        val setter = "set\${name.replaceFirstChar { it.uppercase() }}"
+        val method = target.javaClass.methods.firstOrNull {
+            it.name.equals(setter, ignoreCase = true) && it.parameterCount == 1 &&
+                it.parameterTypes[0].isAssignableFrom(value.javaClass)
+        } ?: error("libbox NetworkInterface setter not found: $setter")
+        method.invoke(target, value)
     }
 
     private fun defaultValue(type: Class<*>): Any? = when (type) {
