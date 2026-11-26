@@ -15,6 +15,11 @@ import java.lang.reflect.Proxy
  * against the pinned gomobile AAR without leaking libbox types into the UI.
  */
 internal class SingBoxAndroidBridge(private val vpn: VpnService) {
+    companion object {
+        private val setupLock = Any()
+        @Volatile private var setupCompleted = false
+    }
+
     private var commandServer: Any? = null
     private var tunDescriptor: ParcelFileDescriptor? = null
     private var platform: Any? = null
@@ -24,17 +29,24 @@ internal class SingBoxAndroidBridge(private val vpn: VpnService) {
     fun start(config: String) {
         close()
         val libbox = Class.forName("io.nekohasekai.libbox.Libbox")
-        val setupType = Class.forName("io.nekohasekai.libbox.SetupOptions")
-        val setup = setupType.getDeclaredConstructor().newInstance()
-        val base = vpn.filesDir
-        val work = vpn.getExternalFilesDir(null) ?: vpn.filesDir
-        val temp = vpn.cacheDir
-        setupType.getMethod("setBasePath", String::class.java).invoke(setup, base.absolutePath)
-        setupType.getMethod("setWorkingPath", String::class.java).invoke(setup, work.absolutePath)
-        setupType.getMethod("setTempPath", String::class.java).invoke(setup, temp.absolutePath)
-        runCatching { setupType.getMethod("setLogMaxLines", Long::class.javaPrimitiveType).invoke(setup, 1000L) }
-        runCatching { setupType.getMethod("setDebug", Boolean::class.javaPrimitiveType).invoke(setup, false) }
-        libbox.getMethod("setup", setupType).invoke(null, setup)
+        synchronized(setupLock) {
+            if (!setupCompleted) {
+                val setupType = Class.forName("io.nekohasekai.libbox.SetupOptions")
+                val setup = setupType.getDeclaredConstructor().newInstance()
+                val base = vpn.filesDir
+                val work = vpn.getExternalFilesDir(null) ?: vpn.filesDir
+                val temp = vpn.cacheDir
+                setupType.getMethod("setBasePath", String::class.java).invoke(setup, base.absolutePath)
+                setupType.getMethod("setWorkingPath", String::class.java).invoke(setup, work.absolutePath)
+                setupType.getMethod("setTempPath", String::class.java).invoke(setup, temp.absolutePath)
+                runCatching { setupType.getMethod("setLogMaxLines", Long::class.javaPrimitiveType).invoke(setup, 3000L) }
+                runCatching { setupType.getMethod("setDebug", Boolean::class.javaPrimitiveType).invoke(setup, false) }
+                runCatching { setupType.getMethod("setFixAndroidStack", Boolean::class.javaPrimitiveType).invoke(setup, true) }
+                libbox.getMethod("setup", setupType).invoke(null, setup)
+                setupCompleted = true
+                Log.i("AegisV/libbox", "libbox runtime initialized")
+            }
+        }
 
         val platformType = Class.forName("io.nekohasekai.libbox.PlatformInterface")
         platform = Proxy.newProxyInstance(platformType.classLoader, arrayOf(platformType)) { _, method, args ->
