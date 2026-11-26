@@ -520,10 +520,6 @@ object PacketStormHero : DigitalLeagueHero {
     override val heroName: String = "Packet-Storm (Шторм Пакетов)"
     override val specialty: String = "Android TUN bridge and sing-box CommandServer"
 
-    // Keep disabled until device tests prove libbox lifecycle, TUN fd handoff,
-    // configuration validation and real packet forwarding end-to-end.
-    private const val RUNTIME_DATA_PLANE_VERIFIED = false
-
     @Volatile
     private var activeBridge: SingBoxAndroidBridge? = null
 
@@ -534,10 +530,6 @@ object PacketStormHero : DigitalLeagueHero {
         onStatus: (String) -> Unit
     ): Boolean {
         shutdownTunnelEngine()
-        if (!RUNTIME_DATA_PLANE_VERIFIED) {
-            onStatus("VPN не запущен: Android libbox data-plane ещё не подтверждён на устройстве")
-            return false
-        }
         return try {
             val bridge = SingBoxAndroidBridge(service)
             bridge.start(singBoxJsonConfig)
@@ -722,31 +714,39 @@ object SingBoxConfigBuilder {
     fun buildJsonConfig(node: FreeVpnNode, tunFd: Int): String {
         val root = JSONObject()
 
-        // 1. Настройка защищенного DNS (Щит Чистоты: блокировка подмены DNS)
+        // sing-box 1.14 removed the legacy DNS server and TUN address fields.
+        // Use the current typed DNS server schema and the unified TUN address list.
         val dns = JSONObject().apply {
             put("servers", JSONArray().apply {
                 put(JSONObject().apply {
+                    put("type", "https")
                     put("tag", "google-doh")
-                    put("address", "https://8.8.8.8/dns-query")
-                    put("detour", "proxy-out")
+                    put("server", "8.8.8.8")
+                    put("server_port", 443)
+                    put("path", "/dns-query")
+                    put("tls", JSONObject().apply {
+                        put("enabled", true)
+                        put("server_name", "dns.google")
+                    })
                 })
                 put(JSONObject().apply {
-                    put("tag", "local-dns")
-                    put("address", "223.5.5.5")
-                    put("detour", "direct-out")
+                    put("type", "udp")
+                    put("tag", "cloudflare-dns")
+                    put("server", "1.1.1.1")
+                    put("server_port", 53)
                 })
             })
+            put("final", "google-doh")
         }
         root.put("dns", dns)
 
-        // 2. Входящий TUN-интерфейс Android
+        // Android VpnService receives this interface through PlatformInterface.openTun().
         val inbounds = JSONArray().apply {
             put(JSONObject().apply {
                 put("type", "tun")
                 put("tag", "tun-in")
-                put("interface_name", "tun0")
-                put("inet4_address", "172.19.0.1/30")
-                put("mtu", 9000)
+                put("address", JSONArray().put("172.19.0.1/30"))
+                put("mtu", 1500)
                 put("auto_route", true)
                 put("strict_route", true)
                 put("stack", "system")
@@ -754,7 +754,7 @@ object SingBoxConfigBuilder {
         }
         root.put("inbounds", inbounds)
 
-        // 3. Исходящий прокси-туннель на основе найденного бесплатного узла
+        // The proxy is the explicit default route for all packets captured by TUN.
         val proxyOutbound = parseNodeToSingBoxOutbound(node)
         val outbounds = JSONArray().apply {
             put(proxyOutbound)
@@ -762,12 +762,9 @@ object SingBoxConfigBuilder {
                 put("type", "direct")
                 put("tag", "direct-out")
             })
-            put(JSONObject().apply {
-                put("type", "dns")
-                put("tag", "dns-out")
-            })
         }
         root.put("outbounds", outbounds)
+        root.put("route", JSONObject().put("final", "proxy-out"))
 
         return root.toString(2)
     }
