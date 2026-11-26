@@ -50,6 +50,7 @@ import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.URI
+import java.net.URLDecoder
 import java.net.URL
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
@@ -283,17 +284,14 @@ class AegisVEngine(
             while (isActive && isPatrolling) {
                 try {
                     val rawCandidates = harvestPublicConfigs()
-                    log("📡 Собрано кандидатов из открытых источников: ${rawCandidates.size}")
-
-                    val healthyNodes = verifyNodesInParallel(rawCandidates.take(60))
-                    log("Проверка серверов: кандидатов ${rawCandidates.size}, TCP-доступны ${healthyNodes.size}")
-                    healthyNodes.forEach { node ->
-                        verifiedPool[node.id] = node
-                    }
-
-                    revalidateExistingPool()
+                    log("📡 Получено уникальных профилей из подписок: ${rawCandidates.size}")
+                    val tcpReachable = verifyNodesInParallel(rawCandidates.take(60))
+                    log("TCP-проверка: проверено ${minOf(rawCandidates.size, 60)}, порт доступен у ${tcpReachable.size}")
+                    // Replace the previous scan snapshot; stale nodes must not survive a failed scan.
+                    verifiedPool.clear()
+                    tcpReachable.forEach { node -> verifiedPool[node.id] = node }
                     updateRankedPool()
-                    log("В списке активных серверов: ${_activePoolFlow.value.size}")
+                    log("Актуальных TCP-кандидатов в списке: ${_activePoolFlow.value.size}")
                 } catch (e: Exception) {
                     log("⚠️ Сетевая турбулентность: ${e.localizedMessage}. Переключаю резервный маршрут...")
                 }
@@ -379,7 +377,7 @@ class AegisVEngine(
             if (purity < 80) return null
 
             FreeVpnNode(
-                id = "${host}_$port",
+                id = "${host}_$port_${uriStr.hashCode().toUInt().toString(16)}",
                 rawUri = uriStr,
                 protocol = protocol,
                 host = host,
@@ -440,6 +438,7 @@ class AegisVEngine(
     private suspend fun updateRankedPool() {
         val ranked = verifiedPool.values
             .filter { it.isHealthy }
+            .distinctBy { it.rawUri }
             .sortedByDescending { node ->
                 val chameleonBonus = chameleon.calculateAdaptabilityBonus(node, currentRegion)
                 (node.purityScore + chameleonBonus) - (node.latencyMs / 5)
