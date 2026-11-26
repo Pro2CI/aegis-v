@@ -95,7 +95,8 @@ internal class SingBoxAndroidBridge(private val vpn: VpnService) {
         builder.setMtu(mtu.coerceIn(576, 9000))
         addAddresses(builder, options, "inet4Address")
         addAddresses(builder, options, "inet6Address")
-        addRoutes(builder, options, "inet4RouteAddress")
+        val ipv4Routes = addRoutes(builder, options, "inet4RouteAddress")
+        if (ipv4Routes == 0) builder.addRoute("0.0.0.0", 0)
         addRoutes(builder, options, "inet6RouteAddress")
         addStrings(builder, options, "dnsServerAddress", true)
         addStrings(builder, options, "excludePackage", false)
@@ -113,12 +114,24 @@ internal class SingBoxAndroidBridge(private val vpn: VpnService) {
         }
     }
 
-    private fun addRoutes(builder: VpnService.Builder, options: Any, property: String) {
+    private fun addRoutes(builder: VpnService.Builder, options: Any, property: String): Int {
+        var count = 0
         iterate(readProperty(options, property)) { item ->
-            val address = readProperty(item, "address")?.toString() ?: return@iterate
-            val prefix = (readProperty(item, "prefix") as? Number)?.toInt() ?: return@iterate
-            builder.addRoute(address, prefix)
+            val raw = item?.toString().orEmpty()
+            val slash = raw.lastIndexOf('/')
+            if (slash > 0) {
+                val address = raw.substring(0, slash)
+                val prefix = raw.substring(slash + 1).toIntOrNull() ?: return@iterate
+                builder.addRoute(address, prefix)
+                count++
+            } else {
+                val address = readProperty(item ?: return@iterate, "address")?.toString() ?: return@iterate
+                val prefix = (readProperty(item, "prefix") as? Number)?.toInt() ?: return@iterate
+                builder.addRoute(address, prefix)
+                count++
+            }
         }
+        return count
     }
 
     private fun addStrings(builder: VpnService.Builder, options: Any, property: String, dns: Boolean) {
