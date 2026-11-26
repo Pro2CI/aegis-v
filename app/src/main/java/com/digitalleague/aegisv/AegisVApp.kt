@@ -601,6 +601,7 @@ object CipherDnsHero : DigitalLeagueHero {
 
     suspend fun resolveCleanIp(domain: String): String? = withContext(Dispatchers.IO) {
         try {
+            require(domain.matches(Regex("[A-Za-z0-9.-]{1,253}"))) { "Invalid DNS query name" }
             val url = URL("https://1.1.1.1/dns-query?name=$domain&type=A")
             val conn = (url.openConnection() as HttpsURLConnection).apply {
                 setRequestProperty("Accept", "application/dns-json")
@@ -610,8 +611,17 @@ object CipherDnsHero : DigitalLeagueHero {
             if (conn.responseCode == 200) {
                 val body = BufferedReader(InputStreamReader(conn.inputStream)).use { it.readText() }
                 conn.disconnect()
-                val match = Regex("\"data\"\\s*:\\s*\"([0-9.]+)\"").find(body)
-                return@withContext match?.groupValues?.get(1)
+                val response = JSONObject(body)
+                if (response.optInt("Status", -1) != 0) return@withContext null
+                val answers = response.optJSONArray("Answer") ?: return@withContext null
+                for (index in 0 until answers.length()) {
+                    val answer = answers.optJSONObject(index) ?: continue
+                    if (answer.optInt("type") == 1) {
+                        val address = answer.optString("data")
+                        if (address.matches(Regex("(?:[0-9]{1,3}\\.){3}[0-9]{1,3}"))) return@withContext address
+                    }
+                }
+                return@withContext null
             }
             conn.disconnect()
         } catch (_: Exception) {
