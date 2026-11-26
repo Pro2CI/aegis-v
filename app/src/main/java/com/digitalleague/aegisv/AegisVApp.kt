@@ -124,6 +124,7 @@ data class FreeVpnNode(
 sealed class LeagueSignal {
     data class SafeTunnelEstablished(val activeNode: FreeVpnNode) : LeagueSignal()
     data class ThreatNeutralized(val heroName: String, val threatType: String, val details: String) : LeagueSignal()
+    data class PacketStormStatus(val message: String, val connected: Boolean) : LeagueSignal()
     data class EmergencyFailover(val reason: String, val backupNode: FreeVpnNode?) : LeagueSignal()
     data class HeroJoinedLeague(val heroId: String, val heroName: String, val specialty: String) : LeagueSignal()
 }
@@ -527,17 +528,17 @@ object PacketStormHero : DigitalLeagueHero {
         singBoxJsonConfig: String,
         activeNode: FreeVpnNode,
         service: AegisVpnService,
-        onStatus: (String) -> Unit
+        onStatus: (String, Boolean) -> Unit
     ): Boolean {
         shutdownTunnelEngine()
         return try {
             val bridge = SingBoxAndroidBridge(service)
             bridge.start(singBoxJsonConfig)
             activeBridge = bridge
-            onStatus("sing-box запущен для ${activeNode.host}:${activeNode.port}")
+            onStatus("TUN создан, libbox запущен для ${activeNode.host}:${activeNode.port}", true)
             true
         } catch (e: Exception) {
-            onStatus("❌ Ошибка запуска sing-box: ${e.cause?.message ?: e.message ?: "неизвестная ошибка"}")
+            onStatus("Ошибка запуска sing-box: ${e.cause?.message ?: e.message ?: "неизвестная ошибка"}", false)
             shutdownTunnelEngine()
             false
         }
@@ -933,7 +934,7 @@ class AegisVpnService : VpnService() {
                 ) { engineMsg ->
                     serviceScope.launch {
                         DigitalLeagueBus.emitSignal(
-                            LeagueSignal.ThreatNeutralized("Packet-Storm", "SING_BOX", engineMsg)
+                            LeagueSignal.PacketStormStatus(engineMsg.first, engineMsg.second)
                         )
                     }
                 }
@@ -1083,6 +1084,10 @@ fun AegisVMainScreen(
                 }
                 is LeagueSignal.ThreatNeutralized -> {
                     statusBanner = "🛡️ Угроза нейтрализована: ${signal.threatType}"
+                }
+                is LeagueSignal.PacketStormStatus -> {
+                    isVpnConnected = signal.connected
+                    statusBanner = signal.message
                 }
             }
         }
