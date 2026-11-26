@@ -8,7 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.Build
-import android.os.ParcelFileDescriptor
+import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
@@ -852,7 +852,6 @@ class AegisVpnService : VpnService() {
             private set
     }
 
-    private var tunInterface: ParcelFileDescriptor? = null
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -925,9 +924,11 @@ class AegisVpnService : VpnService() {
                     node,
                     this@AegisVpnService
                 ) { engineMsg ->
-                    DigitalLeagueBus.emitSignal(
-                        LeagueSignal.ThreatNeutralized("Packet-Storm", "SING_BOX", engineMsg)
-                    )
+                    serviceScope.launch {
+                        DigitalLeagueBus.emitSignal(
+                            LeagueSignal.ThreatNeutralized("Packet-Storm", "SING_BOX", engineMsg)
+                        )
+                    }
                 }
                 if (!engineStarted) {
                     stopVpnTunnel()
@@ -944,11 +945,6 @@ class AegisVpnService : VpnService() {
     private fun stopVpnTunnel() {
         isServiceRunning = false
         PacketStormHero.shutdownTunnelEngine()
-        try {
-            tunInterface?.close()
-            tunInterface = null
-        } catch (_: Exception) {
-        }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
