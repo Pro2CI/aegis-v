@@ -11,8 +11,19 @@ android {
         applicationId = "com.digitalleague.aegisv"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.2.1"
+        versionCode = 4
+        versionName = "0.2.2"
+    }
+
+    // Package only the native libbox binary needed by each device.
+    // Avoid shipping all CPU architectures inside every APK.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+            isUniversalApk = false
+        }
     }
 
     buildTypes {
