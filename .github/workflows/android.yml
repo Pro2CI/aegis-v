@@ -35,13 +35,30 @@ jobs:
         with:
           gradle-version: "9.9.2"
 
-      - name: Build debug APK
-        run: gradle --no-daemon :app:assembleDebug
+      - name: Build ABI-specific debug APKs
+        run: gradle --no-daemon :app:assembleDebug :app:testDebugUnitTest
 
-      - name: Upload debug APK
+      - name: Verify APK architecture splits and report sizes
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apks=(app/build/outputs/apk/debug/*.apk)
+          test "${#apks[@]}" -ge 1
+          for apk in "${apks[@]}"; do
+            mapfile -t abis < <(unzip -Z1 "$apk" | awk -F/ '$1 == "lib" && NF >= 3 {print $2}' | sort -u)
+            if [[ "${#abis[@]}" -gt 1 ]]; then
+              echo "ERROR: $apk contains multiple ABIs: ${abis[*]}"
+              exit 1
+            fi
+            printf '%s | %s | ' "$apk" "${abis[0]:-no-native-libs}"
+            du -h "$apk" | cut -f1
+          done
+
+      - name: Upload ABI-specific debug APKs
         uses: actions/upload-artifact@v7
         with:
-          name: aegis-v-debug-apk
+          name: aegis-v-debug-apks-abi-split
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 14
