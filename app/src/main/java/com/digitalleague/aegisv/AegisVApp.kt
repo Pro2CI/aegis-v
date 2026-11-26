@@ -745,7 +745,10 @@ object SingBoxConfigBuilder {
             put(JSONObject().apply {
                 put("type", "tun")
                 put("tag", "tun-in")
-                put("address", JSONArray().put("172.19.0.1/30"))
+                put("address", JSONArray().apply {
+                    put("172.19.0.1/30")
+                    put("fdfe:dcba:9876::1/126")
+                })
                 put("mtu", 1500)
                 put("auto_route", true)
                 put("strict_route", true)
