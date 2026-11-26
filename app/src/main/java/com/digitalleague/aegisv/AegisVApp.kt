@@ -517,36 +517,26 @@ object MirrorPhantomHero : DigitalLeagueHero {
 object PacketStormHero : DigitalLeagueHero {
     override val heroId: String = "HERO_03_PACKET_STORM"
     override val heroName: String = "Packet-Storm (Шторм Пакетов)"
-    override val specialty: String = "Безопасный запуск sing-box; без фиктивного TCP fallback"
+    override val specialty: String = "Android TUN bridge and sing-box CommandServer"
 
     @Volatile
-    private var activeBoxService: Any? = null
+    private var activeBridge: SingBoxAndroidBridge? = null
 
-    /**
-     * Запуск считается успешным только после реального старта libbox.
-     * Локальный ServerSocket не является VPN-шлюзом и никогда не используется
-     * как резервный вариант: иначе Android направил бы трафик в никуда.
-     */
     fun igniteTunnelEngine(
         singBoxJsonConfig: String,
         activeNode: FreeVpnNode,
+        service: AegisVpnService,
         onStatus: (String) -> Unit
     ): Boolean {
         shutdownTunnelEngine()
         return try {
-            val libboxClass = Class.forName("io.nekohasekai.libbox.Libbox")
-            val newServiceMethod = libboxClass.methods.firstOrNull {
-                it.name == "newService" && it.parameterCount == 2
-            } ?: throw IllegalStateException("В libbox отсутствует ожидаемый метод newService")
-
-            // ВАЖНО: до добавления полноценного Android PlatformInterface передавать null
-            // нельзя — это не подключает Android TUN к ядру. Поэтому не запускаем
-            // потенциально нерабочую сессию и не объявляем VPN подключённым.
-            throw IllegalStateException(
-                "Android PlatformInterface для libbox ещё не реализован; безопасный запуск отменён"
-            )
+            val bridge = SingBoxAndroidBridge(service)
+            bridge.start(singBoxJsonConfig)
+            activeBridge = bridge
+            onStatus("sing-box запущен для ${activeNode.host}:${activeNode.port}")
+            true
         } catch (e: Exception) {
-            onStatus("❌ VPN не запущен: ${e.cause?.message ?: e.message ?: "ошибка libbox"}")
+            onStatus("❌ Ошибка запуска sing-box: ${e.cause?.message ?: e.message ?: "неизвестная ошибка"}")
             shutdownTunnelEngine()
             false
         }
@@ -554,19 +544,15 @@ object PacketStormHero : DigitalLeagueHero {
 
     fun shutdownTunnelEngine() {
         try {
-            activeBoxService?.let { service ->
-                service.javaClass.getMethod("close").invoke(service)
-            }
+            activeBridge?.close()
         } catch (_: Exception) {
         } finally {
-            activeBoxService = null
+            activeBridge = null
         }
     }
 
     override suspend fun onLeagueSignal(signal: LeagueSignal) {
-        if (signal is LeagueSignal.EmergencyFailover && signal.backupNode != null) {
-            // Переключение разрешается только после реализации реального BoxService.
-        }
+        // Failover is handled only after a validated replacement profile is available.
     }
 }
 
@@ -932,40 +918,24 @@ class AegisVpnService : VpnService() {
     private fun establishRealTunnel(node: FreeVpnNode) {
         serviceScope.launch {
             try {
-                // Закрываем старый интерфейс при Zero-Drop переключении на новый узел
-                tunInterface?.close()
-
-                val vpnBuilder = Builder()
-                    .setSession("Aegis-V Guardian")
-                    .setMtu(9000)
-                    .addAddress("172.19.0.1", 30)
-                    .addRoute("0.0.0.0", 0) // Весь IPv4 трафик смартфона идет в щит
-                    .addDnsServer("8.8.8.8")
-                    .addDnsServer("1.1.1.1")
-                    // Исключаем само приложение из туннеля, чтобы избежать петли маршрутизации
-                    .addDisallowedApplication(packageName)
-
-                tunInterface = vpnBuilder.establish()
-                val fd = tunInterface?.fd ?: return@launch
-
-                // Генерируем боевой конфиг sing-box для передачи в нативное ядро libbox
-                val singBoxJsonConfig = SingBoxConfigBuilder.buildJsonConfig(node, fd)
-
-                // Герой #03 PACKET-STORM запускает реальную пересылку пакетов!
-                val engineStarted = PacketStormHero.igniteTunnelEngine(singBoxJsonConfig, node) { engineMsg ->
-                    serviceScope.launch {
-                        DigitalLeagueBus.emitSignal(
-                            LeagueSignal.ThreatNeutralized("Packet-Storm", "TUN_ROUTING", engineMsg)
-                        )
-                    }
+                // libbox creates the Android TUN itself through PlatformInterface.openTun().
+                val singBoxJsonConfig = SingBoxConfigBuilder.buildJsonConfig(node, -1)
+                val engineStarted = PacketStormHero.igniteTunnelEngine(
+                    singBoxJsonConfig,
+                    node,
+                    this@AegisVpnService
+                ) { engineMsg ->
+                    DigitalLeagueBus.emitSignal(
+                        LeagueSignal.ThreatNeutralized("Packet-Storm", "SING_BOX", engineMsg)
+                    )
                 }
                 if (!engineStarted) {
                     stopVpnTunnel()
                     return@launch
                 }
                 isServiceRunning = true
-
             } catch (e: Exception) {
+                Log.e("AegisVpnService", "sing-box start failed", e)
                 stopVpnTunnel()
             }
         }
