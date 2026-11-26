@@ -232,7 +232,7 @@ internal class SingBoxAndroidBridge(private val vpn: VpnService) {
             val ipv6 = options.inet6RouteExcludeAddress
             while (ipv6.hasNext()) {
                 val route = ipv6.next()
-                builder.excludeRoute(IpPrefix(route.address(), route.prefix()))
+                builder.excludeRoute(IpPrefix(InetAddress.getByName(route.address()), route.prefix()))
             }
         }
 
