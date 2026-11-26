@@ -156,7 +156,7 @@ internal class SingBoxAndroidBridge(private val vpn: VpnService) {
     }
 
     private fun readProperty(target: Any, name: String): Any? {
-        val getter = "get\${name.replaceFirstChar { it.uppercase() }}"
+        val getter = "get${name.replaceFirstChar { it.uppercase() }}"
         val method = target.javaClass.methods.firstOrNull {
             it.parameterCount == 0 && (it.name.equals(getter, ignoreCase = true) ||
                 it.name.equals(name, ignoreCase = true))
@@ -191,7 +191,7 @@ internal class SingBoxAndroidBridge(private val vpn: VpnService) {
             setProperty(entry, "index", systemInterface.index)
             setProperty(entry, "mtu", runCatching { systemInterface.mtu }.getOrDefault(1500))
             setProperty(entry, "addresses", stringIterator(systemInterface.interfaceAddresses.map {
-                "\${it.address.hostAddress}/\${it.networkPrefixLength}"
+                "${it.address.hostAddress}/${it.networkPrefixLength}"
             }))
             setProperty(entry, "dnsServer", stringIterator(link.dnsServers.mapNotNull { it.hostAddress }))
             setProperty(entry, "gateway", stringIterator(
@@ -235,7 +235,7 @@ internal class SingBoxAndroidBridge(private val vpn: VpnService) {
     }
 
     private fun setProperty(target: Any, name: String, value: Any) {
-        val setter = "set\${name.replaceFirstChar { it.uppercase() }}"
+        val setter = "set${name.replaceFirstChar { it.uppercase() }}"
         val method = target.javaClass.methods.firstOrNull {
             if (!it.name.equals(setter, ignoreCase = true) || it.parameterCount != 1) {
                 false
