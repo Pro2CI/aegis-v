@@ -724,16 +724,11 @@ object SingBoxConfigBuilder {
                     put("server", "8.8.8.8")
                     put("server_port", 443)
                     put("path", "/dns-query")
+                    put("detour", "proxy-out")
                     put("tls", JSONObject().apply {
                         put("enabled", true)
                         put("server_name", "dns.google")
                     })
-                })
-                put(JSONObject().apply {
-                    put("type", "udp")
-                    put("tag", "cloudflare-dns")
-                    put("server", "1.1.1.1")
-                    put("server_port", 53)
                 })
             })
             put("final", "google-doh")
