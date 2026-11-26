@@ -528,17 +528,17 @@ object PacketStormHero : DigitalLeagueHero {
         singBoxJsonConfig: String,
         activeNode: FreeVpnNode,
         service: AegisVpnService,
-        onStatus: (String, Boolean) -> Unit
+        onStatus: (String) -> Unit
     ): Boolean {
         shutdownTunnelEngine()
         return try {
             val bridge = SingBoxAndroidBridge(service)
             bridge.start(singBoxJsonConfig)
             activeBridge = bridge
-            onStatus("TUN создан, libbox запущен для ${activeNode.host}:${activeNode.port}", true)
+            onStatus("libbox запущен для ${activeNode.host}:${activeNode.port}")
             true
         } catch (e: Exception) {
-            onStatus("Ошибка запуска sing-box: ${e.cause?.message ?: e.message ?: "неизвестная ошибка"}", false)
+            onStatus("Ошибка запуска sing-box: ${e.cause?.message ?: e.message ?: "неизвестная ошибка"}")
             shutdownTunnelEngine()
             false
         }
@@ -934,7 +934,7 @@ class AegisVpnService : VpnService() {
                 ) { engineMsg ->
                     serviceScope.launch {
                         DigitalLeagueBus.emitSignal(
-                            LeagueSignal.PacketStormStatus(engineMsg.first, engineMsg.second)
+                            LeagueSignal.PacketStormStatus(engineMsg, engineMsg.startsWith("libbox запущен"))
                         )
                     }
                 }
