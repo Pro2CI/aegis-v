@@ -5,6 +5,9 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
+import androidx.core.content.ContextCompat
+import android.content.IntentFilter
+import android.content.BroadcastReceiver
 import android.content.Intent
 import android.net.VpnService
 import android.os.Build
@@ -847,6 +850,9 @@ class AegisVpnService : VpnService() {
         const val EXTRA_NODE_PROTO = "extra_node_proto"
         private const val CHANNEL_ID = "aegis_v_guardian_channel"
         private const val NOTIFICATION_ID = 1001
+        const val ACTION_STATUS = "com.digitalleague.aegisv.VPN_STATUS"
+        const val EXTRA_CONNECTED = "extra_connected"
+        const val EXTRA_STATUS = "extra_status"
 
         @Volatile
         var isServiceRunning: Boolean = false
@@ -904,8 +910,8 @@ class AegisVpnService : VpnService() {
         }
 
         val notification = builder
-            .setContentTitle("🦸‍♂️ Aegis-V: Щит Активен")
-            .setContentText("Свободный канал: ${node.host} (${node.protocol.name})")
+            .setContentTitle("AEGIS-V: запуск VPN")
+            .setContentText("Подключение к ${node.host} (${node.protocol.name})")
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setOngoing(true)
             .build()
@@ -935,6 +941,7 @@ class AegisVpnService : VpnService() {
                     return@launch
                 }
                 isServiceRunning = true
+                publishStatus(true, "VPN подключён через ${node.host}")
             } catch (e: Exception) {
                 Log.e("AegisVpnService", "sing-box start failed", e)
                 stopVpnTunnel()
@@ -942,8 +949,17 @@ class AegisVpnService : VpnService() {
         }
     }
 
+    private fun publishStatus(connected: Boolean, message: String) {
+        sendBroadcast(Intent(ACTION_STATUS).setPackage(packageName).apply {
+            putExtra(EXTRA_CONNECTED, connected)
+            putExtra(EXTRA_STATUS, message)
+        })
+    }
+
     private fun stopVpnTunnel() {
+        val wasRunning = isServiceRunning
         isServiceRunning = false
+        if (wasRunning) publishStatus(false, "VPN отключён")
         PacketStormHero.shutdownTunnelEngine()
         try {
             tunInterface?.close()
@@ -993,8 +1009,27 @@ fun AegisVApp() {
         }
     }
 
-    DisposableEffect(Unit) {
+    val vpnStateReceiver = remember {
+        object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == AegisVpnService.ACTION_STATUS) {
+                    isVpnConnected = intent.getBooleanExtra(AegisVpnService.EXTRA_CONNECTED, false)
+                    statusBanner = intent.getStringExtra(AegisVpnService.EXTRA_STATUS)
+                        ?: if (isVpnConnected) "VPN подключён" else "VPN отключён"
+                }
+            }
+        }
+    }
+
+    DisposableEffect(context, vpnStateReceiver) {
+        ContextCompat.registerReceiver(
+            context,
+            vpnStateReceiver,
+            IntentFilter(AegisVpnService.ACTION_STATUS),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
         onDispose {
+            runCatching { context.unregisterReceiver(vpnStateReceiver) }
             engine.stopPatrol()
         }
     }
@@ -1112,14 +1147,15 @@ fun AegisVMainScreen(
                     statusText = statusBanner,
                     onToggleConnection = {
                         if (isVpnConnected) {
-                            isVpnConnected = false
                             onDisconnectTunnel()
-                            statusBanner = "VPN отключён"
                         } else {
-                            // Не запрашиваем VPN-разрешение и не показываем ложный статус
-                            // до подключения настоящего Android PlatformInterface для libbox.
-                            isVpnConnected = false
-                            statusBanner = "VPN пока недоступен: требуется интеграция Android libbox/TUN"
+                            val candidate = bestNode
+                            if (candidate == null) {
+                                statusBanner = "Сначала дождитесь найденного и проверенного узла"
+                            } else {
+                                statusBanner = "Запрашиваю запуск sing-box для ${candidate.host}..."
+                                onConnectTunnel(candidate)
+                            }
                         }
                     }
                 )
