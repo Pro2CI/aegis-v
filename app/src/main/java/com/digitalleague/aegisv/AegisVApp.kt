@@ -7,6 +7,8 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.net.VpnService
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -54,6 +56,13 @@ import java.net.URLDecoder
 import java.net.URL
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import java.security.KeyStore
 import javax.net.ssl.HttpsURLConnection
 import kotlin.system.measureTimeMillis
 
@@ -234,6 +243,7 @@ private fun decodeQueryParameters(rawQuery: String): Map<String, String> =
     }.toMap()
 
 class AegisVEngine(
+    private val appContext: Context,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 ) : DigitalLeagueHero {
 
@@ -293,19 +303,34 @@ class AegisVEngine(
         log("🦸‍♂️ Aegis-V пробудился. Запускаю автономный поиск свободных узлов...")
 
         patrolJob = scope.launch {
+            // Restore encrypted profiles from the previous successful scan before network access.
+            val cached = loadEncryptedNodeCache()
+            if (cached.isNotEmpty()) {
+                log("🗃️ Из защищённого кэша восстановлено профилей: ${cached.size}")
+            } else {
+                log("🗃️ Защищённый кэш узлов пуст.")
+            }
             while (isActive && isPatrolling) {
                 try {
-                    val rawCandidates = harvestPublicConfigs()
-                    log("📡 Получено уникальных профилей из подписок: ${rawCandidates.size}")
-                    val tcpReachable = verifyNodesInParallel(rawCandidates.take(60))
-                    log("TCP-проверка: проверено ${minOf(rawCandidates.size, 60)}, порт доступен у ${tcpReachable.size}")
-                    // Replace the previous scan snapshot; stale nodes must not survive a failed scan.
-                    verifiedPool.clear()
-                    tcpReachable.forEach { node -> verifiedPool[node.id] = node }
+                    logNetworkRoute()
+                    val downloaded = harvestPublicConfigs()
+                    if (downloaded.isNotEmpty()) saveEncryptedNodeCache(downloaded)
+                    val candidates = (downloaded + cached).distinctBy { it.rawUri }.take(120)
+                    log("📡 Профилей: из сети ${downloaded.size}, из кэша ${cached.size}, всего ${candidates.size}")
+                    val tcpReachable = verifyNodesInParallel(candidates.take(60))
+                    log("TCP-проверка: проверено ${minOf(candidates.size, 60)}, порт доступен у ${tcpReachable.size}")
+                    // Never erase a previously verified pool because a blocked/empty scan returned zero.
+                    if (tcpReachable.isNotEmpty()) {
+                        verifiedPool.clear()
+                        tcpReachable.forEach { node -> verifiedPool[node.id] = node }
+                        log("Пул обновлён: ${tcpReachable.size} проверенных TCP-кандидатов.")
+                    } else {
+                        log("Новый пул не получен; прежние проверенные узлы сохранены.")
+                    }
                     updateRankedPool()
                     log("Актуальных TCP-кандидатов в списке: ${_activePoolFlow.value.size}")
                 } catch (e: Exception) {
-                    log("⚠️ Сетевая турбулентность: ${e.localizedMessage}. Переключаю резервный маршрут...")
+                    log("⚠️ Ошибка сканирования: ${e.javaClass.simpleName}: ${e.localizedMessage ?: "без подробностей"}")
                 }
                 delay(45_000L)
             }
@@ -317,6 +342,66 @@ class AegisVEngine(
         patrolJob?.cancel()
         log("⏸️ Патрулирование Aegis-V приостановлено.")
     }
+
+    private fun logNetworkRoute() {
+        val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        val network = cm?.activeNetwork
+        val caps = network?.let { cm.getNetworkCapabilities(it) }
+        if (caps == null) {
+            log("Сеть Android: активная сеть или её параметры недоступны.")
+            return
+        }
+        val vpn = caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+        val validated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        val internet = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        val wifi = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+        val cellular = caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+        log("Сеть Android: VPN=${vpn}, validated=${validated}, internet=${internet}, Wi-Fi=${wifi}, cellular=${cellular}")
+    }
+
+    private fun cacheSecretKey(): SecretKey {
+        val alias = "aegis-v-node-cache-v1"
+        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        (store.getKey(alias, null) as? SecretKey)?.let { return it }
+        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+        generator.init(
+            KeyGenParameterSpec.Builder(
+                alias,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+            ).setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setRandomizedEncryptionRequired(true)
+                .build()
+        )
+        return generator.generateKey()
+    }
+
+    private fun saveEncryptedNodeCache(nodes: List<FreeVpnNode>) {
+        runCatching {
+            val json = JSONArray()
+            nodes.distinctBy { it.rawUri }.take(300).forEach { json.put(it.rawUri) }
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, cacheSecretKey())
+            val encrypted = cipher.iv + cipher.doFinal(json.toString().toByteArray(Charsets.UTF_8))
+            val encoded = Base64.getEncoder().encodeToString(encrypted)
+            appContext.getSharedPreferences("aegis_v_secure_cache", Context.MODE_PRIVATE)
+                .edit().putString("encrypted_nodes_v1", encoded).apply()
+            log("Защищённый кэш обновлён: ${minOf(nodes.size, 300)} профилей (AES-GCM).")
+        }.onFailure { log("Не удалось сохранить защищённый кэш: ${it.javaClass.simpleName}") }
+    }
+
+    private fun loadEncryptedNodeCache(): List<FreeVpnNode> = runCatching {
+        val encoded = appContext.getSharedPreferences("aegis_v_secure_cache", Context.MODE_PRIVATE)
+            .getString("encrypted_nodes_v1", null) ?: return emptyList()
+        val bytes = Base64.getDecoder().decode(encoded)
+        require(bytes.size > 12) { "Invalid encrypted cache" }
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, cacheSecretKey(), GCMParameterSpec(128, bytes.copyOfRange(0, 12)))
+        val json = JSONArray(String(cipher.doFinal(bytes.copyOfRange(12, bytes.size)), Charsets.UTF_8))
+        (0 until json.length()).mapNotNull { index ->
+            parseVpnUri(json.optString(index).takeIf { it.isNotBlank() } ?: return@mapNotNull null)
+        }
+    }.onFailure { log("Защищённый кэш недоступен: ${it.javaClass.simpleName}") }.getOrDefault(emptyList())
 
     private suspend fun harvestPublicConfigs(): List<FreeVpnNode> = withContext(Dispatchers.IO) {
         val discovered = mutableListOf<FreeVpnNode>()
@@ -1185,7 +1270,7 @@ private val TextSecondary = Color(0xFF94A3B8)
 @Composable
 fun AegisVApp() {
     val context = LocalContext.current
-    val engine = remember { AegisVEngine() }
+    val engine = remember(context.applicationContext) { AegisVEngine(context.applicationContext) }
     var pendingNodeToConnect by remember { mutableStateOf<FreeVpnNode?>(null) }
 
     // Лаунчер системного диалога Android: «Разрешить приложению создать VPN-подключение?»
