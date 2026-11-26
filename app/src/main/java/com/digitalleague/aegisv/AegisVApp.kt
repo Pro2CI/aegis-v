@@ -180,7 +180,7 @@ object PurityShield {
         val lowerUri = rawUri.lowercase()
         val lowerHost = host.lowercase()
 
-        if (suspiciousKeywords.any { lowerUri.contains(it) || lowerHost.contains(it) }) {
+        if (suspiciousKeywords.any { lowerUri.contains(it) || lowerHost.contains(it) } || SentinelEyeHero.isBlockedHost(host)) {
             return 0
         }
         if (port !in 1..65535) return 0
@@ -316,7 +316,7 @@ class AegisVEngine(
 
     private suspend fun harvestPublicConfigs(): List<FreeVpnNode> = withContext(Dispatchers.IO) {
         val discovered = mutableListOf<FreeVpnNode>()
-        for (sourceUrl in publicVolunteerSources) {
+        for (sourceUrl in publicVolunteerSources.flatMap { BridgeWeaverHero.expandMirrorSources(it) }.distinct()) {
             try {
                 // Не скрываем состояние источника: иначе пользователь видит вечный пустой список.
                 val rawContent = MirrorPhantomHero.fetchThroughStealthMirror(sourceUrl)
@@ -634,27 +634,59 @@ object CipherDnsHero : DigitalLeagueHero {
     override suspend fun onLeagueSignal(signal: LeagueSignal) {}
 }
 
-/** Герой #05: Фрагментация TLS ClientHello против глубокой инспекции пакетов (DPI) */
+/** Герой #05: единая TLS-политика для поддерживаемых sing-box outbound. */
 object GhostCloakHero : DigitalLeagueHero {
     override val heroId = "HERO_05_GHOST_CLOAK"
     override val heroName = "Ghost-Cloak (Плащ Невидимки)"
-    override val specialty = "TLS-фрагментация и защита от WebRTC-утечек"
+    override val specialty = "Проверка TLS SNI и допустимого uTLS fingerprint"
+
+    fun applyTlsProfile(tls: JSONObject, query: Map<String, String>, fallbackSni: String) {
+        val sni = query["sni"]?.takeIf { it.isNotBlank() } ?: fallbackSni
+        require(sni.length <= 253 && sni.matches(Regex("[A-Za-z0-9.-]+"))) { "Invalid TLS server name" }
+        tls.put("server_name", sni)
+        val fingerprint = query["fp"]?.lowercase()?.takeIf {
+            it in setOf("chrome", "firefox", "edge", "safari", "ios", "android", "360", "qq")
+        } ?: "chrome"
+        tls.put("utls", JSONObject().put("enabled", true).put("fingerprint", fingerprint))
+    }
+
     override suspend fun onLeagueSignal(signal: LeagueSignal) {}
 }
 
-/** Герой #06: Мультиплексирование (Mux) для ускорения медленных бесплатных узлов */
+/** Герой #06: управляемый opt-in mux; не меняет поведение профилей без mux=1. */
 object TurboPulseHero : DigitalLeagueHero {
     override val heroId = "HERO_06_TURBO_PULSE"
     override val heroName = "Turbo-Pulse (Ускоритель Потока)"
-    override val specialty = "Mux-сжатие и BBR-ускорение слабых каналов"
+    override val specialty = "Опциональное мультиплексирование sing-box для VLESS"
+
+    fun applyMultiplex(outbound: JSONObject, query: Map<String, String>, protocol: VpnProtocol) {
+        if (query["mux"] != "1" || protocol != VpnProtocol.VLESS_REALITY && protocol != VpnProtocol.VLESS_TLS) return
+        outbound.put("multiplex", JSONObject().apply {
+            put("enabled", true)
+            put("protocol", "smux")
+            put("max_connections", 4)
+            put("min_streams", 4)
+            put("max_streams", 16)
+            put("padding", true)
+        })
+    }
+
     override suspend fun onLeagueSignal(signal: LeagueSignal) {}
 }
 
-/** Герой #07: Блокировка фишинга, трекеров и вредоносных узлов */
+/** Герой #07: блокировка локальных, тестовых и известных мусорных endpoint до проверки. */
 object SentinelEyeHero : DigitalLeagueHero {
     override val heroId = "HERO_07_SENTINEL_EYE"
     override val heroName = "Sentinel-Eye (Всевидящее Око)"
-    override val specialty = "Анти-фишинг и защита от трекеров в реальном времени"
+    override val specialty = "Фильтрация локальных и подозрительных VPN endpoint"
+
+    private val blockedHosts = setOf("localhost", "localhost.localdomain", "0.0.0.0", "127.0.0.1", "::1")
+    fun isBlockedHost(host: String): Boolean {
+        val normalized = host.trim().trimEnd('.').lowercase()
+        return normalized in blockedHosts || normalized.endsWith(".localhost") ||
+            normalized.endsWith(".invalid") || normalized.endsWith(".test")
+    }
+
     override suspend fun onLeagueSignal(signal: LeagueSignal) {}
 }
 
@@ -681,11 +713,28 @@ object PhoenixRelayHero : DigitalLeagueHero {
     }
 }
 
-/** Герой #09: Резервные P2P-мосты и CDN-ретрансляторы */
+/** Герой #09: генерация проверяемых CDN-кандидатов для публичных raw GitHub подписок. */
 object BridgeWeaverHero : DigitalLeagueHero {
     override val heroId = "HERO_09_BRIDGE_WEAVER"
     override val heroName = "Bridge-Weaver (Ткач Мостов)"
-    override val specialty = "P2P и CDN-мосты при тотальной блокировке серверов"
+    override val specialty = "Резервный CDN-маршрут для публичных источников подписок"
+
+    fun expandMirrorSources(sourceUrl: String): List<String> {
+        val candidates = linkedSetOf(sourceUrl)
+        val prefix = "https://raw.githubusercontent.com/"
+        if (sourceUrl.startsWith(prefix)) {
+            val path = sourceUrl.removePrefix(prefix)
+            val owner = path.substringBefore("/")
+            val remainder = path.substringAfter("/", "")
+            val repository = remainder.substringBefore("/")
+            val filePath = remainder.substringAfter("/", "")
+            if (owner.isNotBlank() && repository.isNotBlank() && filePath.isNotBlank()) {
+                candidates.add("https://cdn.jsdelivr.net/gh/$owner/$repository@main/$filePath")
+            }
+        }
+        return candidates.toList()
+    }
+
     override suspend fun onLeagueSignal(signal: LeagueSignal) {}
 }
 
@@ -861,23 +910,29 @@ object SingBoxConfigBuilder {
                         })
                     }
                 }
+                GhostCloakHero.applyTlsProfile(tls, queryMap, node.sni)
                 out.put("tls", tls)
+                TurboPulseHero.applyMultiplex(out, queryMap, node.protocol)
             }
             VpnProtocol.TROJAN -> {
                 out.put("type", "trojan")
                 out.put("password", uuidOrPass)
-                out.put("tls", JSONObject().apply {
+                val tls = JSONObject().apply {
                     put("enabled", true)
                     put("server_name", node.sni)
-                })
+                }
+                GhostCloakHero.applyTlsProfile(tls, queryMap, node.sni)
+                out.put("tls", tls)
             }
             VpnProtocol.HYSTERIA2 -> {
                 out.put("type", "hysteria2")
                 out.put("password", uuidOrPass)
-                out.put("tls", JSONObject().apply {
+                val tls = JSONObject().apply {
                     put("enabled", true)
                     put("server_name", node.sni)
-                })
+                }
+                GhostCloakHero.applyTlsProfile(tls, queryMap, node.sni)
+                out.put("tls", tls)
             }
             else -> {
                 val (method, password) = decodeShadowsocksCredentials(node.rawUri, uri)
