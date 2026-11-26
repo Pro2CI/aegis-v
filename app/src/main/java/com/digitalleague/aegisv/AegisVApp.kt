@@ -503,16 +503,31 @@ object MirrorPhantomHero : DigitalLeagueHero {
                 readTimeout = 8000
                 instanceFollowRedirects = true
                 setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36")
-                setRequestProperty("Accept", "text/plain,text/html,*/*;q=0.8")
+                setRequestProperty("Accept", "text/plain,application/octet-stream;q=0.9,*/*;q=0.5")
+                setRequestProperty("Accept-Encoding", "identity")
                 setRequestProperty("Cache-Control", "no-cache")
             }
-            if (conn.responseCode in 200..299) {
-                val text = BufferedReader(InputStreamReader(conn.inputStream)).use { it.readText() }
+            val status = conn.responseCode
+            if (status in 200..299) {
+                val text = BufferedReader(InputStreamReader(conn.inputStream)).use { reader ->
+                    val result = StringBuilder()
+                    val buffer = CharArray(8192)
+                    while (true) {
+                        val count = reader.read(buffer)
+                        if (count < 0) break
+                        require(result.length + count <= 4 * 1024 * 1024) { "Subscription response exceeds 4 MiB limit" }
+                        result.append(buffer, 0, count)
+                    }
+                    result.toString()
+                }
                 conn.disconnect()
+                if (text.isBlank()) Log.w("AegisV/Mirror", "Empty subscription response: $targetUrl")
                 return@withContext text
             }
+            Log.w("AegisV/Mirror", "Subscription HTTP $status from $targetUrl")
             conn.disconnect()
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            Log.w("AegisV/Mirror", "Subscription fetch failed: $targetUrl", error)
         }
         return@withContext null
     }
