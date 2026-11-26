@@ -518,43 +518,38 @@ object MirrorPhantomHero : DigitalLeagueHero {
 object PacketStormHero : DigitalLeagueHero {
     override val heroId: String = "HERO_03_PACKET_STORM"
     override val heroName: String = "Packet-Storm (Шторм Пакетов)"
-    override val specialty: String = "Реальная маршрутизация TUN-трафика через sing-box / локальный шлюз"
+    override val specialty: String = "Безопасный запуск sing-box; без фиктивного TCP fallback"
 
     @Volatile
     private var activeBoxService: Any? = null
 
-    @Volatile
-    private var fallbackProxySocket: ServerSocket? = null
-
     /**
-     * Запускает реальную прокачку трафика через найденный узел
+     * Запуск считается успешным только после реального старта libbox.
+     * Локальный ServerSocket не является VPN-шлюзом и никогда не используется
+     * как резервный вариант: иначе Android направил бы трафик в никуда.
      */
-    fun igniteTunnelEngine(singBoxJsonConfig: String, activeNode: FreeVpnNode, onStatus: (String) -> Unit) {
+    fun igniteTunnelEngine(
+        singBoxJsonConfig: String,
+        activeNode: FreeVpnNode,
+        onStatus: (String) -> Unit
+    ): Boolean {
         shutdownTunnelEngine()
-
-        // Попытка №1: Запуск нативного ядра io.nekohasekai.libbox (sing-box)
-        try {
+        return try {
             val libboxClass = Class.forName("io.nekohasekai.libbox.Libbox")
-            val newServiceMethod = libboxClass.methods.firstOrNull { it.name == "newService" && it.parameterCount == 2 }
-            if (newServiceMethod != null) {
-                val serviceInstance = newServiceMethod.invoke(null, singBoxJsonConfig, null)
-                val startMethod = serviceInstance.javaClass.getMethod("start")
-                startMethod.invoke(serviceInstance)
-                activeBoxService = serviceInstance
-                onStatus("⚡ Packet-Storm: Нативное ядро sing-box запущено! Трафик идёт через ${activeNode.host}")
-                return
-            }
-        } catch (_: Exception) {
-            // Если libbox.aar ещё не подключен в build.gradle, переходим к Попытке №2
-        }
+            val newServiceMethod = libboxClass.methods.firstOrNull {
+                it.name == "newService" && it.parameterCount == 2
+            } ?: throw IllegalStateException("В libbox отсутствует ожидаемый метод newService")
 
-        // Попытка №2: Поднятие встроенного локального TCP-моста на порту 10808
-        try {
-            val server = ServerSocket(0)
-            fallbackProxySocket = server
-            onStatus("⚠️ Внимание: добавьте implementation(\"io.nekohasekai:libbox:1.10.0\") в build.gradle для полного L3-туннеля (локальный шлюз :${server.localPort} готов)")
+            // ВАЖНО: до добавления полноценного Android PlatformInterface передавать null
+            // нельзя — это не подключает Android TUN к ядру. Поэтому не запускаем
+            // потенциально нерабочую сессию и не объявляем VPN подключённым.
+            throw IllegalStateException(
+                "Android PlatformInterface для libbox ещё не реализован; безопасный запуск отменён"
+            )
         } catch (e: Exception) {
-            onStatus("❌ Ошибка запуска шлюза Packet-Storm: ${e.message}")
+            onStatus("❌ VPN не запущен: ${e.cause?.message ?: e.message ?: "ошибка libbox"}")
+            shutdownTunnelEngine()
+            false
         }
     }
 
@@ -567,18 +562,11 @@ object PacketStormHero : DigitalLeagueHero {
         } finally {
             activeBoxService = null
         }
-
-        try {
-            fallbackProxySocket?.close()
-        } catch (_: Exception) {
-        } finally {
-            fallbackProxySocket = null
-        }
     }
 
     override suspend fun onLeagueSignal(signal: LeagueSignal) {
         if (signal is LeagueSignal.EmergencyFailover && signal.backupNode != null) {
-            // Мгновенная перестройка маршрута при падении узла
+            // Переключение разрешается только после реализации реального BoxService.
         }
     }
 }
@@ -962,14 +950,14 @@ class AegisVpnService : VpnService() {
                 val singBoxJsonConfig = SingBoxConfigBuilder.buildJsonConfig(node, fd)
 
                 // Герой #03 PACKET-STORM запускает реальную пересылку пакетов!
-                PacketStormHero.igniteTunnelEngine(singBoxJsonConfig, node) { engineMsg ->
+                val engineStarted = PacketStormHero.igniteTunnelEngine(singBoxJsonConfig, node) { engineMsg ->
                     serviceScope.launch {
                         DigitalLeagueBus.emitSignal(
                             LeagueSignal.ThreatNeutralized("Packet-Storm", "TUN_ROUTING", engineMsg)
                         )
                     }
                 }
-                isServiceRunning = true
+                if (!engineStarted) {\n                    stopVpnTunnel()\n                    return@launch\n                }\n                isServiceRunning = true
 
             } catch (e: Exception) {
                 stopVpnTunnel()
