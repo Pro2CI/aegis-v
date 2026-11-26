@@ -19,6 +19,7 @@ import io.nekohasekai.libbox.InterfaceUpdateListener
 import io.nekohasekai.libbox.Libbox
 import io.nekohasekai.libbox.LocalDNSTransport
 import io.nekohasekai.libbox.NetworkInterfaceIterator
+import io.nekohasekai.libbox.Notification as LibboxNotification
 import io.nekohasekai.libbox.OverrideOptions
 import io.nekohasekai.libbox.PlatformInterface
 import io.nekohasekai.libbox.PlatformUser
@@ -29,6 +30,7 @@ import io.nekohasekai.libbox.SystemProxyStatus
 import io.nekohasekai.libbox.TunOptions
 import io.nekohasekai.libbox.WIFIState
 import io.nekohasekai.libbox.NetworkInterface as LibboxNetworkInterface
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.NetworkInterface as JavaNetworkInterface
 
@@ -225,7 +227,7 @@ internal class SingBoxAndroidBridge(private val vpn: VpnService) {
             val ipv4 = options.inet4RouteExcludeAddress
             while (ipv4.hasNext()) {
                 val route = ipv4.next()
-                builder.excludeRoute(IpPrefix(route.address(), route.prefix()))
+                builder.excludeRoute(IpPrefix(InetAddress.getByName(route.address()), route.prefix()))
             }
             val ipv6 = options.inet6RouteExcludeAddress
             while (ipv6.hasNext()) {
@@ -348,6 +350,7 @@ internal class SingBoxAndroidBridge(private val vpn: VpnService) {
         override fun underNetworkExtension(): Boolean = false
         override fun includeAllNetworks(): Boolean = false
         override fun readWIFIState(): WIFIState? = null
+        override fun sendNotification(notification: LibboxNotification) = Unit
         override fun clearDNSCache() = Unit
         override fun registerMyInterface(name: String) = Unit
         override fun usePlatformShell(): Boolean = false
