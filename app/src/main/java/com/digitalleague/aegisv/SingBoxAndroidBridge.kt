@@ -92,6 +92,10 @@ internal class SingBoxAndroidBridge(private val vpn: VpnService) {
                 it.parameterTypes[0] == String::class.java
         } ?: error("libbox startOrReloadService(config, options) not found")
         startMethod.invoke(commandServer, config, overrideOptions)
+        check(tunDescriptor != null) {
+            "sing-box accepted the config but did not establish the Android TUN interface"
+        }
+        Log.i("AegisV/libbox", "CommandServer started and Android TUN established")
     }
 
     private fun openTun(options: Any): Int {
@@ -112,6 +116,7 @@ internal class SingBoxAndroidBridge(private val vpn: VpnService) {
         val pfd = builder.establish() ?: error("Android refused to establish the TUN interface")
         tunDescriptor?.close()
         tunDescriptor = pfd
+        Log.i("AegisV/libbox", "TUN established: fd=${pfd.fd}, mtu=$mtu")
         return pfd.fd
     }
 
@@ -189,9 +194,6 @@ internal class SingBoxAndroidBridge(private val vpn: VpnService) {
                 "\${it.address.hostAddress}/\${it.networkPrefixLength}"
             }))
             setProperty(entry, "dnsServer", stringIterator(link.dnsServers.mapNotNull { it.hostAddress }))
-            setProperty(entry, "dnsSearchDomain", stringIterator(
-                link.domains?.split(Regex("[,\\\\s]+"))?.filter { it.isNotBlank() }.orEmpty()
-            ))
             setProperty(entry, "gateway", stringIterator(
                 link.routes.filter { it.destination.prefixLength == 0 }
                     .mapNotNull { route -> route.gateway?.takeUnless { it.isAnyLocalAddress }?.hostAddress }
