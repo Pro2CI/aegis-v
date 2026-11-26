@@ -63,8 +63,8 @@ internal class SingBoxAndroidBridge(private val vpn: VpnService) {
 
         val server = CommandServer(handler, platform)
         try {
-            server.start()
             commandServer = server
+            server.start()
             server.startOrReloadService(config, OverrideOptions())
             check(tunDescriptor != null) {
                 "sing-box accepted the configuration but did not call Android PlatformInterface.openTun()"
@@ -103,7 +103,7 @@ internal class SingBoxAndroidBridge(private val vpn: VpnService) {
 
     private inner class AegisCommandServerHandler : CommandServerHandler {
         override fun serviceStop() {
-            close()
+            vpn.stopSelf()
         }
 
         override fun serviceReload() {
@@ -188,14 +188,23 @@ internal class SingBoxAndroidBridge(private val vpn: VpnService) {
         private fun addRoutes(builder: VpnService.Builder, options: TunOptions) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 val ipv4 = options.inet4RouteAddress
+                val hasIpv4Route = ipv4.hasNext()
                 while (ipv4.hasNext()) {
                     val route = ipv4.next()
                     builder.addRoute(route.address(), route.prefix())
                 }
+                if (!hasIpv4Route && options.inet4Address.hasNext()) {
+                    builder.addRoute("0.0.0.0", 0)
+                }
+
                 val ipv6 = options.inet6RouteAddress
+                val hasIpv6Route = ipv6.hasNext()
                 while (ipv6.hasNext()) {
                     val route = ipv6.next()
                     builder.addRoute(route.address(), route.prefix())
+                }
+                if (!hasIpv6Route && options.inet6Address.hasNext()) {
+                    builder.addRoute("::", 0)
                 }
             } else {
                 val ipv4 = options.inet4RouteRange
