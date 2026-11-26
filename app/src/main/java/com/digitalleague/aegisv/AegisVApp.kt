@@ -348,6 +348,13 @@ class AegisVEngine(
         }
     }
 
+    private fun parseQueryParameters(rawQuery: String): Map<String, String> =
+        rawQuery.split("&").mapNotNull { item ->
+            if (item.isBlank()) return@mapNotNull null
+            val key = item.substringBefore("=")
+            val value = item.substringAfter("=", "")
+            runCatching { URLDecoder.decode(key, "UTF-8") to URLDecoder.decode(value, "UTF-8") }.getOrNull()
+        }.toMap()
     private fun parseVpnUri(uriStr: String): FreeVpnNode? {
         return try {
             val protocol = when {
@@ -369,9 +376,8 @@ class AegisVEngine(
             val host = parsed.host ?: return null
             val port = if (parsed.port > 0) parsed.port else 443
 
-            val query = parsed.query ?: ""
-            val sniMatch = Regex("sni=([^&]+)").find(query)
-            val sni = sniMatch?.groupValues?.get(1) ?: host
+            val query = parseQueryParameters(parsed.rawQuery.orEmpty())
+            val sni = query["sni"]?.takeIf { it.isNotBlank() } ?: host
 
             val purity = PurityShield.evaluateNodePurity(host, port, uriStr)
             if (purity < 80) return null
@@ -785,12 +791,8 @@ object SingBoxConfigBuilder {
                 .replace("trojan://", "http://")
                 .replace("ss://", "http://")
         )
-        val uuidOrPass = uri.userInfo ?: ""
-        val queryMap = (uri.query ?: "").split("&")
-            .mapNotNull {
-                val parts = it.split("=")
-                if (parts.size == 2) parts[0] to parts[1] else null
-            }.toMap()
+        val queryMap = parseQueryParameters(uri.rawQuery.orEmpty())
+        val uuidOrPass = uri.rawUserInfo?.let { URLDecoder.decode(it, "UTF-8") }.orEmpty()
 
         val out = JSONObject().apply {
             put("tag", "proxy-out")
