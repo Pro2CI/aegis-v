@@ -419,19 +419,25 @@ class AegisVEngine(
             return host to parsed
         }
 
-        val primarySources = publicVolunteerSources
-            .flatMap { BridgeWeaverHero.expandMirrorSources(it) }
-            .distinct()
-        val primaryResults = coroutineScope {
-            primarySources.map { url -> async(Dispatchers.IO) { fetchAndParse(url) } }.awaitAll()
+        suspend fun fetchSources(urls: List<String>): List<FreeVpnNode> = coroutineScope {
+            urls.distinct().map { url -> async(Dispatchers.IO) { fetchAndParse(url) } }.awaitAll()
+                .flatMap { (host, nodes) ->
+                    log("Источник $host: найдено профилей: ${nodes.size}")
+                    nodes
+                }.distinctBy { it.rawUri }
         }
-        val discovered = primaryResults.flatMap { (host, nodes) ->
-            log("Источник $host: найдено профилей: ${nodes.size}")
-            nodes
-        }.distinctBy { it.rawUri }.toMutableList()
+
+        val primarySources = publicVolunteerSources.flatMap { BridgeWeaverHero.expandMirrorSources(it) }.distinct()
+        val discovered = fetchSources(primarySources).toMutableList()
+
+        // Only fan out to secondary CDN front doors if the primary routes all fail.
+        if (discovered.isEmpty()) {
+            val secondarySources = publicVolunteerSources.flatMap { BridgeWeaverHero.expandSecondaryMirrorSources(it) }.distinct()
+            discovered.addAll(fetchSources(secondarySources))
+        }
 
         // The API hostname is a last resort, not a regular polling endpoint.
-        // This avoids consuming unauthenticated GitHub API rate limits on every scan.
+        // This avoids consuming unauthenticated GitHub API rate limits during normal operation.
         if (discovered.isEmpty()) {
             val apiFallback = publicVolunteerSources.firstNotNullOfOrNull(BridgeWeaverHero::githubApiFallback)
             if (apiFallback != null) {
@@ -440,7 +446,6 @@ class AegisVEngine(
                 discovered.addAll(nodes)
             }
         }
-
         log("Всего найдено профилей до проверки доступности: ${discovered.size}")
         discovered.distinctBy { it.rawUri }
     }
@@ -855,14 +860,21 @@ object BridgeWeaverHero : DigitalLeagueHero {
     fun expandMirrorSources(sourceUrl: String): List<String> {
         val candidates = linkedSetOf(sourceUrl)
         val path = parseGitHubRawPath(sourceUrl) ?: return candidates.toList()
-        val repoPath = "${path.owner}/${path.repository}"
-        listOf("cdn.jsdelivr.net", "fastly.jsdelivr.net", "gcore.jsdelivr.net", "testingcf.jsdelivr.net")
-            .forEach { cdn -> candidates.add("https://$cdn/gh/$repoPath@${path.branch}/${path.filePath}") }
-        candidates.add("https://raw.githack.com/$repoPath/${path.branch}/${path.filePath}")
-        candidates.add("https://github.com/$repoPath/raw/refs/heads/${path.branch}/${path.filePath}")
+        candidates.add("https://cdn.jsdelivr.net/gh/${path.owner}/${path.repository}@${path.branch}/${path.filePath}")
         return candidates.toList()
     }
 
+    fun expandSecondaryMirrorSources(sourceUrl: String): List<String> {
+        val path = parseGitHubRawPath(sourceUrl) ?: return emptyList()
+        val repoPath = "${path.owner}/${path.repository}"
+        return listOf(
+            "https://fastly.jsdelivr.net/gh/$repoPath@${path.branch}/${path.filePath}",
+            "https://gcore.jsdelivr.net/gh/$repoPath@${path.branch}/${path.filePath}",
+            "https://testingcf.jsdelivr.net/gh/$repoPath@${path.branch}/${path.filePath}",
+            "https://raw.githack.com/$repoPath/${path.branch}/${path.filePath}",
+            "https://github.com/$repoPath/raw/refs/heads/${path.branch}/${path.filePath}"
+        )
+    }
     fun githubApiFallback(sourceUrl: String): String? {
         val path = parseGitHubRawPath(sourceUrl) ?: return null
         return "https://api.github.com/repos/${path.owner}/${path.repository}/contents/${path.filePath}?ref=${path.branch}"
