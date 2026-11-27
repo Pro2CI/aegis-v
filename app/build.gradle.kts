@@ -46,6 +46,10 @@ android {
 }
 
 dependencies {
+    // HTTP client for fetching VPN subscriptions and node configurations.
+    implementation("com.squareup.retrofit2:retrofit:2.11.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
     implementation("com.github.singbox-android:libbox:1.14.4")
     implementation(platform("androidx.compose:compose-bom:2025.11.00"))
     implementation("androidx.activity:activity-compose:1.11.0")
