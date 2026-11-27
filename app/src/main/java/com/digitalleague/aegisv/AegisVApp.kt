@@ -663,7 +663,7 @@ object MirrorPhantomHero : DigitalLeagueHero {
         return diagnostics[host] ?: "проверка ещё не завершена"
     }
 
-    private inner class BootstrapDns : Dns {
+    private class BootstrapDns(private val providers: List<DohProvider>) : Dns {
         override fun lookup(hostname: String): List<InetAddress> {
             runCatching { Dns.SYSTEM.lookup(hostname) }.getOrNull()
                 ?.takeIf { it.isNotEmpty() }
@@ -671,7 +671,7 @@ object MirrorPhantomHero : DigitalLeagueHero {
 
             val resolved = mutableListOf<InetAddress>()
             var lastFailure: Exception? = null
-            for (provider in dohProviders) {
+            for (provider in providers) {
                 try {
                     val client = OkHttpClient.Builder()
                         .dns(Dns { requested ->
@@ -689,12 +689,12 @@ object MirrorPhantomHero : DigitalLeagueHero {
                     for (recordType in listOf("A", "AAAA")) {
                         val encodedName = java.net.URLEncoder.encode(hostname, "UTF-8")
                         val request = Request.Builder()
-                            .url("https://\${provider.host}/dns-query?name=\$encodedName&type=\$recordType")
+                            .url("https://${provider.host}/dns-query?name=$encodedName&type=$recordType")
                             .header("Accept", "application/dns-json")
                             .header("User-Agent", "AegisV-Android/0.3")
                             .build()
                         client.newCall(request).execute().use { response ->
-                            if (!response.isSuccessful) throw IllegalStateException("DoH HTTP \${response.code}")
+                            if (!response.isSuccessful) throw IllegalStateException("DoH HTTP ${response.code}")
                             val json = JSONObject(response.body?.string().orEmpty())
                             val answers = json.optJSONArray("Answer") ?: JSONArray()
                             for (index in 0 until answers.length()) {
@@ -712,13 +712,13 @@ object MirrorPhantomHero : DigitalLeagueHero {
                     lastFailure = error
                 }
             }
-            throw UnknownHostException("System DNS and DoH providers failed for \$hostname: \${lastFailure?.javaClass?.simpleName ?: "no address"}")
+            throw UnknownHostException("System DNS and DoH providers failed for $hostname: ${lastFailure?.javaClass?.simpleName ?: "no address"}")
         }
     }
 
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .dns(BootstrapDns())
+            .dns(BootstrapDns(dohProviders))
             .connectTimeout(8, TimeUnit.SECONDS)
             .readTimeout(10, TimeUnit.SECONDS)
             .callTimeout(18, TimeUnit.SECONDS)
@@ -744,12 +744,12 @@ object MirrorPhantomHero : DigitalLeagueHero {
                 .build()
             httpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    diagnostics[host] = "HTTP \${response.code}; DNS/TLS/соединение пройдены"
-                    Log.w("AegisV/Mirror", "HTTP \${response.code}: \$host")
+                    diagnostics[host] = "HTTP ${response.code}; DNS/TLS/соединение пройдены"
+                    Log.w("AegisV/Mirror", "HTTP ${response.code}: $host")
                     return@withContext null
                 }
                 val body = response.body ?: run {
-                    diagnostics[host] = "HTTP \${response.code}, пустое тело"
+                    diagnostics[host] = "HTTP ${response.code}, пустое тело"
                     return@withContext null
                 }
                 if (body.contentLength() > 4L * 1024L * 1024L) {
@@ -770,13 +770,13 @@ object MirrorPhantomHero : DigitalLeagueHero {
                     }
                 }
                 val text = output.toString("UTF-8")
-                diagnostics[host] = "HTTP \${response.code}, получено \${output.size()} байт"
+                diagnostics[host] = "HTTP ${response.code}, получено ${output.size()} байт"
                 if (text.isBlank()) null else text
             }
         } catch (error: Exception) {
-            val reason = "\${error.javaClass.simpleName}: \${error.message.orEmpty().take(120)}"
-            diagnostics[host] = "ошибка DNS/TLS/HTTPS: \$reason"
-            Log.w("AegisV/Mirror", "Fetch failed: \$host: \$reason")
+            val reason = "${error.javaClass.simpleName}: ${error.message.orEmpty().take(120)}"
+            diagnostics[host] = "ошибка DNS/TLS/HTTPS: $reason"
+            Log.w("AegisV/Mirror", "Fetch failed: $host: $reason")
             null
         }
     }
