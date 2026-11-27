@@ -922,7 +922,7 @@ object LeagueDiagnosticLab {
         )
         report.add(
             if (!mirrorText.isNullOrBlank()) "3. Mirror-Phantom (CDN): OK (получено ${mirrorText.length} байт ключей)"
-            else "3. Mirror-Phantom (CDN): Зеркало недоступно, активен Phoenix-Relay"
+            else "3. Mirror-Phantom (CDN): это зеркало недоступно; будут проверены альтернативные маршруты"
         )
 
         // 4. Проверка Героя #03 Packet-Storm (наличие нативного ядра libbox)
