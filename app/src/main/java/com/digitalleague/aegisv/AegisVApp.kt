@@ -55,6 +55,13 @@ import java.net.Proxy
 import java.net.URI
 import java.net.URLDecoder
 import java.net.URL
+import java.net.InetAddress
+import java.net.UnknownHostException
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.TimeUnit
+import okhttp3.Dns
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.Cipher
@@ -412,7 +419,10 @@ class AegisVEngine(
         suspend fun fetchAndParse(sourceUrl: String): Pair<String, List<FreeVpnNode>> {
             val host = runCatching { URI(sourceUrl).host }.getOrNull() ?: sourceUrl
             val responseBody = MirrorPhantomHero.fetchThroughStealthMirror(sourceUrl)
-            if (responseBody.isNullOrBlank()) return host to emptyList()
+            if (responseBody.isNullOrBlank()) {
+                log("Источник $host: ${MirrorPhantomHero.diagnosticFor(sourceUrl)}")
+                return host to emptyList()
+            }
             // GitHub Contents API may return JSON with a base64-encoded "content" field.
             val rawContent = runCatching {
                 val json = JSONObject(responseBody)
@@ -426,6 +436,7 @@ class AegisVEngine(
                 .mapNotNull(::parseVpnUri)
                 .distinctBy { it.rawUri }
                 .toList()
+            log("Источник $host: ${MirrorPhantomHero.diagnosticFor(sourceUrl)}; профилей после разбора: ${parsed.size}")
             return host to parsed
         }
 
@@ -637,56 +648,141 @@ class AegisVEngine(
 object MirrorPhantomHero : DigitalLeagueHero {
     override val heroId: String = "HERO_02_MIRROR_PHANTOM"
     override val heroName: String = "Mirror-Phantom (Призрак Зеркал)"
-    override val specialty: String = "Добыча ключей через DoH и CDN-зеркала в обход блокировок"
+    override val specialty: String = "Загрузка подписок с резервным DNS-over-HTTPS"
+
+    private data class DohProvider(val host: String, val ip: String)
+    private val dohProviders = listOf(
+        DohProvider("cloudflare-dns.com", "1.1.1.1"),
+        DohProvider("dns.google", "8.8.8.8"),
+        DohProvider("dns.quad9.net", "9.9.9.9")
+    )
+    private val diagnostics = ConcurrentHashMap<String, String>()
+
+    fun diagnosticFor(sourceUrl: String): String {
+        val host = runCatching { URI(sourceUrl).host }.getOrNull() ?: "unknown"
+        return diagnostics[host] ?: "проверка ещё не завершена"
+    }
+
+    private inner class BootstrapDns : Dns {
+        override fun lookup(hostname: String): List<InetAddress> {
+            runCatching { Dns.SYSTEM.lookup(hostname) }.getOrNull()
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { return it }
+
+            val resolved = mutableListOf<InetAddress>()
+            var lastFailure: Exception? = null
+            for (provider in dohProviders) {
+                try {
+                    val client = OkHttpClient.Builder()
+                        .dns(Dns { requested ->
+                            if (requested.equals(provider.host, ignoreCase = true)) {
+                                listOf(InetAddress.getByAddress(provider.host, provider.ip.split(".").map { it.toInt().toByte() }.toByteArray()))
+                            } else {
+                                Dns.SYSTEM.lookup(requested)
+                            }
+                        })
+                        .connectTimeout(5, TimeUnit.SECONDS)
+                        .readTimeout(5, TimeUnit.SECONDS)
+                        .callTimeout(7, TimeUnit.SECONDS)
+                        .build()
+
+                    for (recordType in listOf("A", "AAAA")) {
+                        val encodedName = java.net.URLEncoder.encode(hostname, "UTF-8")
+                        val request = Request.Builder()
+                            .url("https://\${provider.host}/dns-query?name=\$encodedName&type=\$recordType")
+                            .header("Accept", "application/dns-json")
+                            .header("User-Agent", "AegisV-Android/0.3")
+                            .build()
+                        client.newCall(request).execute().use { response ->
+                            if (!response.isSuccessful) throw IllegalStateException("DoH HTTP \${response.code}")
+                            val json = JSONObject(response.body?.string().orEmpty())
+                            val answers = json.optJSONArray("Answer") ?: JSONArray()
+                            for (index in 0 until answers.length()) {
+                                val answer = answers.optJSONObject(index) ?: continue
+                                val type = answer.optInt("type")
+                                val address = answer.optString("data")
+                                if ((type == 1 || type == 28) && address.isNotBlank()) {
+                                    runCatching { InetAddress.getByName(address) }.getOrNull()?.let { resolved.add(it) }
+                                }
+                            }
+                        }
+                    }
+                    if (resolved.isNotEmpty()) return resolved.distinct()
+                } catch (error: Exception) {
+                    lastFailure = error
+                }
+            }
+            throw UnknownHostException("System DNS and DoH providers failed for \$hostname: \${lastFailure?.javaClass?.simpleName ?: "no address"}")
+        }
+    }
+
+    private val httpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .dns(BootstrapDns())
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .callTimeout(18, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .retryOnConnectionFailure(true)
+            .build()
+    }
 
     suspend fun fetchThroughStealthMirror(targetUrl: String): String? = withContext(Dispatchers.IO) {
-        // First use Android's configured route; then retry without an explicit HTTP proxy.
-        // This does not bypass network-level blocking, but avoids a stale system proxy setting.
-        val routes = listOf<Proxy?>(null, Proxy.NO_PROXY)
-        for ((index, proxy) in routes.withIndex()) {
-            var conn: HttpsURLConnection? = null
-            try {
-                val url = URL(targetUrl)
-                conn = (if (proxy == null) url.openConnection() else url.openConnection(proxy)) as HttpsURLConnection
-                conn.connectTimeout = 9000
-                conn.readTimeout = 9000
-                conn.instanceFollowRedirects = true
-                conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36")
-                conn.setRequestProperty("Accept", "application/vnd.github.raw, application/vnd.github+json, text/plain, application/octet-stream;q=0.9,*/*;q=0.5")
-                conn.setRequestProperty("Accept-Encoding", "identity")
-                conn.setRequestProperty("Cache-Control", "no-cache")
-                val status = conn.responseCode
-                if (status in 200..299) {
-                    val text = BufferedReader(InputStreamReader(conn.inputStream)).use { reader ->
-                        val result = StringBuilder()
-                        val buffer = CharArray(8192)
-                        while (true) {
-                            val count = reader.read(buffer)
-                            if (count < 0) break
-                            require(result.length + count <= 4 * 1024 * 1024) { "Subscription response exceeds 4 MiB limit" }
-                            result.append(buffer, 0, count)
-                        }
-                        result.toString()
-                    }
-                    if (text.isNotBlank()) {
-                        Log.i("AegisV/Mirror", "Mirror fetch OK: host=${url.host}, bytes=${text.length}, route=${index + 1}")
-                        return@withContext text
-                    }
-                    Log.w("AegisV/Mirror", "Mirror returned empty body: ${url.host}")
-                } else {
-                    Log.w("AegisV/Mirror", "Mirror HTTP ${status}: ${url.host}, route=${index + 1}")
-                }
-            } catch (error: Exception) {
-                Log.w("AegisV/Mirror", "Mirror fetch failed: ${runCatching { URL(targetUrl).host }.getOrDefault("unknown")}, route=${index + 1}: ${error.javaClass.simpleName}: ${error.message}")
-            } finally {
-                conn?.disconnect()
-            }
+        val host = runCatching { URI(targetUrl).host }.getOrNull() ?: "unknown"
+        if (!targetUrl.startsWith("https://", ignoreCase = true)) {
+            diagnostics[host] = "отклонено: разрешён только HTTPS"
+            return@withContext null
         }
-        null
+        try {
+            val request = Request.Builder()
+                .url(targetUrl)
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36")
+                .header("Accept", "application/vnd.github.raw, application/vnd.github+json, text/plain, application/octet-stream;q=0.9,*/*;q=0.5")
+                .header("Accept-Encoding", "identity")
+                .header("Cache-Control", "no-cache")
+                .build()
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    diagnostics[host] = "HTTP \${response.code}; DNS/TLS/соединение пройдены"
+                    Log.w("AegisV/Mirror", "HTTP \${response.code}: \$host")
+                    return@withContext null
+                }
+                val body = response.body ?: run {
+                    diagnostics[host] = "HTTP \${response.code}, пустое тело"
+                    return@withContext null
+                }
+                if (body.contentLength() > 4L * 1024L * 1024L) {
+                    diagnostics[host] = "ответ больше лимита 4 MiB"
+                    return@withContext null
+                }
+                val output = ByteArrayOutputStream()
+                body.byteStream().use { input ->
+                    val buffer = ByteArray(8192)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        if (output.size() + count > 4 * 1024 * 1024) {
+                            diagnostics[host] = "ответ превысил лимит 4 MiB"
+                            return@withContext null
+                        }
+                        output.write(buffer, 0, count)
+                    }
+                }
+                val text = output.toString("UTF-8")
+                diagnostics[host] = "HTTP \${response.code}, получено \${output.size()} байт"
+                if (text.isBlank()) null else text
+            }
+        } catch (error: Exception) {
+            val reason = "\${error.javaClass.simpleName}: \${error.message.orEmpty().take(120)}"
+            diagnostics[host] = "ошибка DNS/TLS/HTTPS: \$reason"
+            Log.w("AegisV/Mirror", "Fetch failed: \$host: \$reason")
+            null
+        }
     }
 
     override suspend fun onLeagueSignal(signal: LeagueSignal) {
-        // При аварийном обрыве связи Mirror-Phantom готов мгновенно подгрузить свежие зеркала
+        // Диагностика остаётся доступной; загрузка узлов выполняется до VPN-туннеля.
     }
 }
 
