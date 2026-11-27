@@ -92,6 +92,10 @@ enum class VpnProtocol {
     VMESS,
     SOCKS,
     SHADOWSOCKS,
+    ANYTLS,
+    SHADOWTLS,
+    HTTP,
+    SSH,
     WIREGUARD,
     UNKNOWN
 }
@@ -291,7 +295,6 @@ class AegisVEngine(
             DigitalLeagueBus.registerHero(GhostCloakHero)
             DigitalLeagueBus.registerHero(TurboPulseHero)
             DigitalLeagueBus.registerHero(SentinelEyeHero)
-            DigitalLeagueBus.registerHero(PhoenixRelayHero)
             DigitalLeagueBus.registerHero(BridgeWeaverHero)
             DigitalLeagueBus.registerHero(HeartCoreHero)
         }
@@ -408,8 +411,15 @@ class AegisVEngine(
         // consume its full timeout before the next source is attempted.
         suspend fun fetchAndParse(sourceUrl: String): Pair<String, List<FreeVpnNode>> {
             val host = runCatching { URI(sourceUrl).host }.getOrNull() ?: sourceUrl
-            val rawContent = MirrorPhantomHero.fetchThroughStealthMirror(sourceUrl)
-            if (rawContent.isNullOrBlank()) return host to emptyList()
+            val responseBody = MirrorPhantomHero.fetchThroughStealthMirror(sourceUrl)
+            if (responseBody.isNullOrBlank()) return host to emptyList()
+            // GitHub Contents API may return JSON with a base64-encoded "content" field.
+            val rawContent = runCatching {
+                val json = JSONObject(responseBody)
+                if (json.optString("encoding") == "base64" && json.has("content")) {
+                    decodeBase64Text(json.optString("content")) ?: responseBody
+                } else responseBody
+            }.getOrDefault(responseBody)
             val parsed = tryDecodeBase64(rawContent.trim()).lineSequence()
                 .map { it.trim() }
                 .filter { it.isNotEmpty() }
@@ -432,19 +442,9 @@ class AegisVEngine(
 
         // Only fan out to secondary CDN front doors if the primary routes all fail.
         if (discovered.isEmpty()) {
-            val secondarySources = publicVolunteerSources.flatMap { BridgeWeaverHero.expandSecondaryMirrorSources(it) }.distinct()
-            discovered.addAll(fetchSources(secondarySources))
-        }
-
-        // The API hostname is a last resort, not a regular polling endpoint.
-        // This avoids consuming unauthenticated GitHub API rate limits during normal operation.
-        if (discovered.isEmpty()) {
-            val apiFallback = publicVolunteerSources.firstNotNullOfOrNull(BridgeWeaverHero::githubApiFallback)
-            if (apiFallback != null) {
-                val (host, nodes) = fetchAndParse(apiFallback)
-                log("Резервный GitHub API ($host): найдено профилей: ${nodes.size}")
-                discovered.addAll(nodes)
-            }
+            // Try the Contents API for every GitHub source, not just the first repository.
+            val apiFallbacks = publicVolunteerSources.mapNotNull(BridgeWeaverHero::githubApiFallback).distinct()
+            discovered.addAll(fetchSources(apiFallbacks))
         }
         log("Всего найдено профилей до проверки доступности: ${discovered.size}")
         discovered.distinctBy { it.rawUri }
@@ -492,6 +492,10 @@ class AegisVEngine(
                 uriStr.startsWith("hysteria://", true) -> VpnProtocol.HYSTERIA
                 uriStr.startsWith("tuic://", true) -> VpnProtocol.TUIC
                 uriStr.startsWith("socks://", true) || uriStr.startsWith("socks5://", true) -> VpnProtocol.SOCKS
+                uriStr.startsWith("anytls://", true) -> VpnProtocol.ANYTLS
+                uriStr.startsWith("shadowtls://", true) || uriStr.startsWith("shadow-tls://", true) -> VpnProtocol.SHADOWTLS
+                uriStr.startsWith("http://", true) || uriStr.startsWith("https://", true) -> VpnProtocol.HTTP
+                uriStr.startsWith("ssh://", true) -> VpnProtocol.SSH
                 uriStr.startsWith("ss://", true) -> VpnProtocol.SHADOWSOCKS
                 else -> return null
             }
@@ -507,10 +511,16 @@ class AegisVEngine(
                 return FreeVpnNode("${host}_${port}_${uriStr.hashCode().toUInt().toString(16)}", uriStr,
                     protocol, host, port, host, "SS-$host", purityScore = purity)
             }
-            val normalized = uriStr.replace(Regex("(?i)^(hy2|hysteria2|hysteria|vless|trojan|tuic|socks5|socks|ss)://"), "http://")
+            val normalized = uriStr.replace(Regex("(?i)^(hy2|hysteria2|hysteria|vless|trojan|tuic|socks5|socks|ss|anytls|shadowtls|shadow-tls)://"), "http://")
             val parsed = URI(normalized)
             val host = parsed.host ?: return null
-            val port = parsed.port.takeIf { it in 1..65535 } ?: if (protocol == VpnProtocol.SOCKS) 1080 else 443
+            val defaultPort = when (protocol) {
+                VpnProtocol.SOCKS -> 1080
+                VpnProtocol.HTTP -> if (uriStr.startsWith("https://", true)) 443 else 8080
+                VpnProtocol.SSH -> 22
+                else -> 443
+            }
+            val port = parsed.port.takeIf { it in 1..65535 } ?: defaultPort
             val query = decodeQueryParameters(parsed.rawQuery.orEmpty())
             val sni = query["sni"]?.takeIf { it.isNotBlank() } ?: query["peer"]?.takeIf { it.isNotBlank() } ?: host
             val purity = PurityShield.evaluateNodePurity(host, port, uriStr)
@@ -812,29 +822,6 @@ object SentinelEyeHero : DigitalLeagueHero {
     override suspend fun onLeagueSignal(signal: LeagueSignal) {}
 }
 
-/** Герой #08: Мгновенное восстановление связи из офлайн-кэша золотых узлов */
-object PhoenixRelayHero : DigitalLeagueHero {
-    override val heroId = "HERO_08_PHOENIX_RELAY"
-    override val heroName = "Phoenix-Relay (Феникс Возрождения)"
-    override val specialty = "Мгновенный старт из кэша при полной изоляции сети"
-    private val goldenBackupNodes = mutableListOf<FreeVpnNode>()
-
-    fun preserveGoldenNode(node: FreeVpnNode) {
-        if (goldenBackupNodes.none { it.id == node.id }) {
-            goldenBackupNodes.add(0, node)
-            if (goldenBackupNodes.size > 10) goldenBackupNodes.removeLast()
-        }
-    }
-
-    fun getEmergencyNode(): FreeVpnNode? = goldenBackupNodes.firstOrNull()
-
-    override suspend fun onLeagueSignal(signal: LeagueSignal) {
-        if (signal is LeagueSignal.SafeTunnelEstablished) {
-            preserveGoldenNode(signal.activeNode)
-        }
-    }
-}
-
 /** Герой #09: генерация проверяемых CDN-кандидатов для публичных raw GitHub подписок. */
 object BridgeWeaverHero : DigitalLeagueHero {
     override val heroId = "HERO_09_BRIDGE_WEAVER"
@@ -1024,13 +1011,11 @@ object SingBoxConfigBuilder {
     }
 
     private fun parseNodeToSingBoxOutbound(node: FreeVpnNode): JSONObject {
-        val uri = URI(
-            node.rawUri.replace("hy2://", "http://")
-                .replace("hysteria2://", "http://")
-                .replace("vless://", "http://")
-                .replace("trojan://", "http://")
-                .replace("ss://", "http://")
+        val normalizedUri = node.rawUri.replace(
+            Regex("(?i)^(hy2|hysteria2|hysteria|vless|trojan|tuic|socks5|socks|ss|anytls|shadowtls|shadow-tls)://"),
+            "http://"
         )
+        val uri = URI(normalizedUri)
         val queryMap = decodeQueryParameters(uri.rawQuery.orEmpty())
         val uuidOrPass = uri.rawUserInfo?.let { URLDecoder.decode(it, "UTF-8") }.orEmpty()
 
@@ -1120,6 +1105,41 @@ object SingBoxConfigBuilder {
                 uri.rawUserInfo?.let { user ->
                     out.put("username", URLDecoder.decode(user.substringBefore(":"), "UTF-8"))
                     out.put("password", URLDecoder.decode(user.substringAfter(":", ""), "UTF-8"))
+                }
+            }
+            VpnProtocol.HTTP -> {
+                out.put("type", "http")
+                uri.rawUserInfo?.let { user ->
+                    out.put("username", URLDecoder.decode(user.substringBefore(":"), "UTF-8"))
+                    out.put("password", URLDecoder.decode(user.substringAfter(":", ""), "UTF-8"))
+                }
+                if (node.rawUri.startsWith("https://", true)) {
+                    out.put("tls", JSONObject().put("enabled", true).put("server_name", node.sni))
+                }
+            }
+            VpnProtocol.ANYTLS -> {
+                val password = uri.rawUserInfo?.let { URLDecoder.decode(it, "UTF-8") }.orEmpty()
+                require(password.isNotBlank()) { "AnyTLS password is missing" }
+                out.put("type", "anytls")
+                out.put("password", password)
+                out.put("tls", JSONObject().put("enabled", true).put("server_name", node.sni))
+            }
+            VpnProtocol.SHADOWTLS -> {
+                val password = uri.rawUserInfo?.let { URLDecoder.decode(it, "UTF-8") }.orEmpty()
+                require(password.isNotBlank()) { "ShadowTLS password is missing" }
+                out.put("type", "shadowtls")
+                out.put("version", queryMap["version"]?.toIntOrNull() ?: 3)
+                out.put("password", password)
+                out.put("tls", JSONObject().put("enabled", true).put("server_name", node.sni))
+            }
+            VpnProtocol.SSH -> {
+                out.put("type", "ssh")
+                val userInfo = uri.rawUserInfo.orEmpty()
+                val username = URLDecoder.decode(userInfo.substringBefore(":"), "UTF-8")
+                require(username.isNotBlank()) { "SSH username is missing" }
+                out.put("user", username)
+                userInfo.substringAfter(":", "").takeIf { it.isNotBlank() }?.let {
+                    out.put("password", URLDecoder.decode(it, "UTF-8"))
                 }
             }
             VpnProtocol.WIREGUARD, VpnProtocol.UNKNOWN -> error("Unsupported proxy protocol")
