@@ -97,7 +97,6 @@ enum class VpnProtocol {
     SHADOWTLS,
     HTTP,
     SSH,
-    WIREGUARD,
     UNKNOWN
 }
 
@@ -112,11 +111,11 @@ enum class RegionProfile(val displayName: String, val preferredProtocols: List<V
     ),
     UNSTABLE_NETWORK(
         "Нестабильный канал / Потеря пакетов",
-        listOf(VpnProtocol.HYSTERIA2, VpnProtocol.VLESS_REALITY, VpnProtocol.WIREGUARD)
+        listOf(VpnProtocol.HYSTERIA2, VpnProtocol.VLESS_REALITY, VpnProtocol.TROJAN)
     ),
     OPEN_WEB(
         "Открытая сеть",
-        listOf(VpnProtocol.WIREGUARD, VpnProtocol.VLESS_REALITY, VpnProtocol.SHADOWSOCKS)
+        listOf(VpnProtocol.VLESS_REALITY, VpnProtocol.VLESS_TLS, VpnProtocol.SHADOWSOCKS)
     )
 }
 
@@ -441,10 +440,21 @@ class AegisVEngine(
         val primarySources = publicVolunteerSources.flatMap { BridgeWeaverHero.expandMirrorSources(it) }.distinct()
         val discovered = fetchSources(primarySources).toMutableList()
 
-        // Only fan out to secondary CDN front doors if the primary routes all fail.
+        // The secondary CDN front doors existed but were not called by the active loader.
+        // Try them before falling back to the GitHub API.
         if (discovered.isEmpty()) {
-            // Try the Contents API for every GitHub source, not just the first repository.
-            val apiFallbacks = publicVolunteerSources.mapNotNull(BridgeWeaverHero::githubApiFallback).distinct()
+            val secondarySources = publicVolunteerSources
+                .flatMap { BridgeWeaverHero.expandSecondaryMirrorSources(it) }
+                .distinct()
+            log("Основные источники пусты; запускаю дополнительные CDN-зеркала: ${secondarySources.size}")
+            discovered.addAll(fetchSources(secondarySources))
+        }
+
+        if (discovered.isEmpty()) {
+            val apiFallbacks = publicVolunteerSources
+                .mapNotNull(BridgeWeaverHero::githubApiFallback)
+                .distinct()
+            log("CDN-зеркала не дали профилей; проверяю GitHub API: ${apiFallbacks.size}")
             discovered.addAll(fetchSources(apiFallbacks))
         }
         log("Всего найдено профилей до проверки доступности: ${discovered.size}")
@@ -1152,7 +1162,7 @@ object SingBoxConfigBuilder {
                     out.put("password", URLDecoder.decode(it, "UTF-8"))
                 }
             }
-            VpnProtocol.WIREGUARD, VpnProtocol.UNKNOWN -> error("Unsupported proxy protocol")
+            VpnProtocol.UNKNOWN -> error("Unsupported proxy protocol")
             else -> {
                 val (method, password) = decodeShadowsocksCredentials(node.rawUri, uri)
                 require(method.isNotBlank() && password.isNotBlank()) { "Invalid Shadowsocks method/password" }
