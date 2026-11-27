@@ -51,6 +51,7 @@ import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.Proxy
 import java.net.URI
 import java.net.URLDecoder
 import java.net.URL
@@ -629,40 +630,49 @@ object MirrorPhantomHero : DigitalLeagueHero {
     override val specialty: String = "Добыча ключей через DoH и CDN-зеркала в обход блокировок"
 
     suspend fun fetchThroughStealthMirror(targetUrl: String): String? = withContext(Dispatchers.IO) {
-        try {
-            val url = URL(targetUrl)
-            val conn = (url.openConnection() as HttpsURLConnection).apply {
-                connectTimeout = 6000
-                readTimeout = 6000
-                instanceFollowRedirects = true
-                setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36")
-                setRequestProperty("Accept", "application/vnd.github.raw, text/plain,application/octet-stream;q=0.9,*/*;q=0.5")
-                setRequestProperty("Accept-Encoding", "identity")
-                setRequestProperty("Cache-Control", "no-cache")
-            }
-            val status = conn.responseCode
-            if (status in 200..299) {
-                val text = BufferedReader(InputStreamReader(conn.inputStream)).use { reader ->
-                    val result = StringBuilder()
-                    val buffer = CharArray(8192)
-                    while (true) {
-                        val count = reader.read(buffer)
-                        if (count < 0) break
-                        require(result.length + count <= 4 * 1024 * 1024) { "Subscription response exceeds 4 MiB limit" }
-                        result.append(buffer, 0, count)
+        // First use Android's configured route; then retry without an explicit HTTP proxy.
+        // This does not bypass network-level blocking, but avoids a stale system proxy setting.
+        val routes = listOf<Proxy?>(null, Proxy.NO_PROXY)
+        for ((index, proxy) in routes.withIndex()) {
+            var conn: HttpsURLConnection? = null
+            try {
+                val url = URL(targetUrl)
+                conn = (if (proxy == null) url.openConnection() else url.openConnection(proxy)) as HttpsURLConnection
+                conn.connectTimeout = 9000
+                conn.readTimeout = 9000
+                conn.instanceFollowRedirects = true
+                conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36")
+                conn.setRequestProperty("Accept", "application/vnd.github.raw, application/vnd.github+json, text/plain, application/octet-stream;q=0.9,*/*;q=0.5")
+                conn.setRequestProperty("Accept-Encoding", "identity")
+                conn.setRequestProperty("Cache-Control", "no-cache")
+                val status = conn.responseCode
+                if (status in 200..299) {
+                    val text = BufferedReader(InputStreamReader(conn.inputStream)).use { reader ->
+                        val result = StringBuilder()
+                        val buffer = CharArray(8192)
+                        while (true) {
+                            val count = reader.read(buffer)
+                            if (count < 0) break
+                            require(result.length + count <= 4 * 1024 * 1024) { "Subscription response exceeds 4 MiB limit" }
+                            result.append(buffer, 0, count)
+                        }
+                        result.toString()
                     }
-                    result.toString()
+                    if (text.isNotBlank()) {
+                        Log.i("AegisV/Mirror", "Mirror fetch OK: host=${url.host}, bytes=${text.length}, route=${index + 1}")
+                        return@withContext text
+                    }
+                    Log.w("AegisV/Mirror", "Mirror returned empty body: ${url.host}")
+                } else {
+                    Log.w("AegisV/Mirror", "Mirror HTTP ${status}: ${url.host}, route=${index + 1}")
                 }
-                conn.disconnect()
-                if (text.isBlank()) Log.w("AegisV/Mirror", "Empty subscription response: $targetUrl")
-                return@withContext text
+            } catch (error: Exception) {
+                Log.w("AegisV/Mirror", "Mirror fetch failed: ${runCatching { URL(targetUrl).host }.getOrDefault("unknown")}, route=${index + 1}: ${error.javaClass.simpleName}: ${error.message}")
+            } finally {
+                conn?.disconnect()
             }
-            Log.w("AegisV/Mirror", "Subscription HTTP $status from $targetUrl")
-            conn.disconnect()
-        } catch (error: Exception) {
-            Log.w("AegisV/Mirror", "Subscription fetch failed: $targetUrl", error)
         }
-        return@withContext null
+        null
     }
 
     override suspend fun onLeagueSignal(signal: LeagueSignal) {
